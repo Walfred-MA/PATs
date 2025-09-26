@@ -47,7 +47,7 @@ rule assem:
 
         prefix = queries.get(input.assem, "").replace("_h", "#")
         if len(prefix) and prefix not in ["CHM13_h1", "HG38_h1"]:
-            shell(" python namecontigsfix.py -i outputs/{filename} -n {prefix} -o outputs/{filename}_ ")
+            shell(" python {params.script}/namecontigsfix.py -i outputs/{filename} -n {prefix} -o outputs/{filename}_ ")
             shell(" mv outputs/{filename}_ outputs/{filename} ")
 
         shell("samtools faidx outputs/{filename}")
