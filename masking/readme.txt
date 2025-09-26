@@ -1,3 +1,5 @@
+Used for masking and prepare assemblies for PATs
+
 1. Soft link all your assemblies in the Assemblies/ folder, for example
 
 for f in $orginal_assemblies/; do ln -s "$f" "Assemblies/$(basename "$f")"; done
