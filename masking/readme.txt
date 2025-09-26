@@ -8,6 +8,7 @@ the bash ./install.sh
 
 2. Soft link all your assemblies in the Assemblies/ folder, for example
 
+mkdir Assemblies
 for f in $orginal_assemblies/; do ln -s "$f" "Assemblies/$(basename "$f")"; done
 
 3. create a path tsv file for all novel assemblies. Tsv file has two columns without header: 1. samplename_h[1/2] 2. filepath. 
