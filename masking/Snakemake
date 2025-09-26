@@ -9,6 +9,8 @@ QueryPath   = config["QueryPath"]
 SaveFolder  = config["SaveFolder"]
 ScriptFolder= config["ScriptFolder"]
 
+os.makedirs(SaveFolder, exist_ok=True)
+
 # Build queries dictionary dynamically from QueryPath
 queries = {}
 with open(QueryPath, mode='r') as f:
