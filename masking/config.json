@@ -2,5 +2,5 @@
   "slurm": "--account=mchaisso_100 --time 50:00:00 --partition=qcb",
   "QueryPath": "../query_pathes_withrefs.txt",
   "SaveFolder": "outputs/",
-  "ScriptFolder": "../scripts/",
+  "ScriptFolder": "scripts/",
 }
