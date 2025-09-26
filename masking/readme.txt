@@ -1,7 +1,10 @@
 Used for masking and prepare assemblies for PATs
 
 1. Run install.sh to install all required packages.
-
+Making sure miniconda has been installed already
+check page:
+https://www.anaconda.com/docs/getting-started/miniconda/install#linux-2
+the bash ./install.sh
 
 2. Soft link all your assemblies in the Assemblies/ folder, for example
 
