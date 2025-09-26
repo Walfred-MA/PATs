@@ -31,8 +31,8 @@ def run():
         """
         parser = argparse.ArgumentParser(description="program edit assembly contig names for PATs")
         parser.add_argument("-i", "--input", help="path to input data file",dest="input", type=str, required=True)
-        parser.add_argument("-n", "--name", help="path to input data file",dest="name", type=str, required=True)
-        parser.add_argument("-o", "--output", help="path to input data file",dest="output", type=str, required=True)
+        parser.add_argument("-n", "--name", help="the haplotype name to add",dest="name", type=str, required=True)
+        parser.add_argument("-o", "--output", help="path to output data file",dest="output", type=str, required=True)
 
         parser.set_defaults(func=main)
         args = parser.parse_args()
