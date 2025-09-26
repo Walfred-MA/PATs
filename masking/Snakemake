@@ -1,1 +1,54 @@
+import os
+import json
 
+# Load JSON config
+configfile: "config.json"
+
+slurm       = config["slurm"]
+QueryPath   = config["QueryPath"]
+SaveFolder  = config["SaveFolder"]
+ScriptFolder= config["ScriptFolder"]
+
+# Build queries dictionary dynamically from QueryPath
+queries = {}
+with open(QueryPath, mode='r') as f:
+    for line in f:
+        line = line.split()
+        queries[line[1]] = line[0]
+
+wksamples = list(queries.values())
+assemblies = list(queries.keys())
+
+rule all:
+    input:
+        fasta = [ancient(prefix + "_maskcheckfix4") for prefix in assemblies]
+
+rule assem:
+    input:
+        assem = ancient("{prefix}")
+    params:
+        qpath  = QueryPath,
+        script = ScriptFolder,
+        hg38   = HG38,
+        chm13  = CHM13,
+        temp   = TempFolder
+    resources:
+        mem_mb=3000,
+        slurm_extra="--mem=3G -c 1 "
+    threads: 1
+    output:
+        check = "{prefix}_maskcheckfix4"
+    run:
+        filename = os.path.basename(input.assem)
+
+        shell(" windowmasker -mk_counts -in {input.assem} -out outputs/{filename}_maskinfo ")
+
+        shell(" windowmasker -ustat outputs/{filename}_maskinfo -dust yes -outfmt fasta -in {input.assem} -out outputs/{filename} ")
+
+        prefix = queries.get(input.assem, "").replace("_h", "#")
+        if len(prefix) and prefix not in ["CHM13_h1", "HG38_h1"]:
+            shell(" python namecontigsfix.py -i outputs/{filename} -n {prefix} -o outputs/{filename}_ ")
+            shell(" mv outputs/{filename}_ outputs/{filename} ")
+
+        shell("samtools faidx outputs/{filename}")
+        shell("touch {output.check}")
