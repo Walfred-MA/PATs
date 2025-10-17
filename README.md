@@ -109,6 +109,7 @@ D. Find, merge and index compiled k-mer matrices
 After Snakemake completes, run:
 
 cat tempfolder/*_bfixpartitions{small,large}.list | sed 's/$/_kmatrix.txt/' | sort -u > allpartitions.list
+Then each line will be each compiled matrix
 
 Then concatenate all matrices:
 xargs -a allpartitions.list -I {} bash -c '[[ -f "{}" ]] && cat "{}"' > All_matrix.txt
