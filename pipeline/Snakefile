@@ -18,11 +18,12 @@ slurm       = config["slurm"]
 QueryPath   = config["QueryPath"]
 ScriptFolder= config["ScriptFolder"]
 TargetFolder= config["TargetFolder"]
-TempFolder  = "snaketemp"
 blockfile   = config["genelist"]
-blockmergesize = 80000
 Numrun      = config["NumPartitions"]
 Refprefix = config["ReferencePrefix"]
+
+TempFolder     = config.get("TempFolder", "snaketemp")
+blockmergesize = config.get("blocksize", 80000)
 
 def ensure_binaries_exist(ScriptFolder):
     """
