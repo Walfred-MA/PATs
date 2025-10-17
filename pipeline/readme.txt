@@ -32,8 +32,8 @@ partitioned sequence regions from pangenome assemblies and short-read queries.
 {
     "slurm": true,
     "QueryPath": "query_pathes.txt",
-    "ScriptFolder": "scripts/",
-    "TargetFolder": "targets/",
+    "ScriptFolder": "../scripts/",
+    "TargetFolder": "groups/",
     "TempFolder": "snaketemp",
     "genelist": "regions.bed",
     "blocksize": 80000,
