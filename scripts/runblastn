@@ -1,0 +1,68 @@
+#!/bin/bash
+# Usage: reblastn <blastn options...> -out <output_file or -> -db <dbname>
+
+set -euo pipefail
+
+# Save all arguments
+args=("$@")
+out=""
+db=""
+
+# Parse -out and -db
+for ((i = 0; i < $#; i++)); do
+  if [[ ${args[$i]} == "-out" ]]; then
+    out="${args[$((i + 1))]}"
+	if [[ "$out" != "-" ]]; then
+		args[$((i + 1))]="${out}.tmp"
+	fi
+  elif [[ ${args[$i]} == "-db" ]]; then
+    db="${args[$((i + 1))]}"
+  fi
+done
+
+# Validate output and db
+if [[ -z "$out" || -z "$db" ]]; then
+  exit 1
+fi
+
+# Check for sequence file
+seqfile="${db}.seq"
+if [[ ! -f "$seqfile" ]]; then
+  exit 1
+fi
+
+# Define the replacement awk logic
+replacer_awk='
+BEGIN {
+  line_num = 0
+  while ((getline line < seqfile) > 0) {
+    line_num++
+    seq[line_num] = line
+  }
+  close(seqfile)
+}
+{
+  while (match($0, /BL_ORD_ID:[0-9]+/)) {
+    full = substr($0, RSTART, RLENGTH)
+    id = substr(full, 11) + 1
+    if (id in seq) {
+      replacement = seq[id]
+      $0 = substr($0, 1, RSTART - 1) replacement substr($0, RSTART + RLENGTH)
+    } else {
+      break
+    }
+  }
+  print
+}
+'
+
+# Handle stdout case
+if [[ "$out" == "-" ]]; then
+  blastn "${args[@]}" | awk -v seqfile="$seqfile" "$replacer_awk"
+else
+  tmpout="${out}.tmp"
+  blastn "${args[@]}"
+  awk -v seqfile="$seqfile" "$replacer_awk" "$tmpout" > "$out"
+  rm $tmpout
+fi
+
