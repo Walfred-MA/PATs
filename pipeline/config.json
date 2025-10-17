@@ -1,0 +1,28 @@
+{
+  // SLURM args passed to jobs (queue, time, account, etc.)
+  "slurm": " --account=mchaisso_100 --time 50:00:00 --partition=qcb ",
+
+  // Path to the assemblies list in the required format
+  "QueryPath": "query_pathes.txt_withref.txt",
+
+  // Folder containing your pipeline scripts
+  "ScriptFolder": "/project2/mchaisso_100/walfred/projects/newphase/newBuild/scripts/",
+
+  // Root folder for pipeline outputs
+  "TargetFolder": "groups",
+
+  // Folder for intermediate / temporary files
+  "TempFolder": "snaketemp",
+
+  // BED file of target genes (required format)
+  "genelist": "./NovelLoci.bed",
+
+  // Prefix used to identify reference contigs/chromosomes.
+  // Examples: "chr" (hg38) or "NC_0609" (CHM13). Must be a true prefix
+  // of the chromosome names in your reference FASTA (e.g., "chr1", "NC_060925.1").
+  "ReferencePrefix": "NC_0609",
+
+  // Number of partitions to split the run into. Recommend ~1000 genes/partition.
+  // Example: 3000 genes -> 3 partitions.
+  "NumPartitions": 1
+}
