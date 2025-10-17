@@ -30,7 +30,7 @@ partitioned sequence regions from pangenome assemblies and short-read queries.
 
 🛠️ Config Fields (example config.json):
 {
-    "slurm": true,
+    "slurm": " --account=mchaisso_100 --time 50:00:00 --partition=qcb ",
     "QueryPath": "query_pathes.txt_withrefs.txt",
     "ScriptFolder": "../scripts/",
     "TargetFolder": "groups/",
