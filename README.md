@@ -72,7 +72,7 @@ C. Define your target regions (genes) as a BED
 
 D. Run the Snakemake workflow
 -----------------------------
-- See `snakemake/` for the workflow, required C++ utilities, and detailed
+- See `pipeline/` for the workflow, required C++ utilities, and detailed
   run instructions. Compile the provided C++ tools as directed in that
   folder’s README.
 
@@ -86,7 +86,7 @@ SLURM example (adjust to your site):
 wrapper scripts may consume it to set paths and partitioning.)
 
 
-3) Optional JSON configuration (example + field descriptions)
+3) JSON configuration (example + field descriptions)
 -------------------------------------------------------------
 Many wrappers expect a JSON file to centralize common settings:
 
