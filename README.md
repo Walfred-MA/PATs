@@ -70,8 +70,7 @@ C. Define your target regions (genes) as a BED
      Example:
        chr5_GL339449v2_alt  456848  485731  SMN2  Target=456848-457609,457774-458352
 
-
-2) Run the Snakemake workflow
+D. Run the Snakemake workflow
 -----------------------------
 - See `snakemake/` for the workflow, required C++ utilities, and detailed
   run instructions. Compile the provided C++ tools as directed in that
