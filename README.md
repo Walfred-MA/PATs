@@ -99,8 +99,9 @@ Descriptions:
 - QueryPath:     TSV of assemblies/references
 - ScriptFolder:  Path to scripts folder
 - TargetFolder:  Output folder for results
-- TempFolder:    Temp file directory
+- TempFolder:    Temp file directory, default: ./snaketemp/
 - genelist:      BED file for genes (4- or 5-col)
+- blocksize:     the max sequence length used for pangenome alleles, larger will be splitted, default: 80,000, 
 - ReferencePrefix: Prefix used in reference contigs (e.g., "NC_0609" or "chr")
 - NumPartitions: Number of partitions to divide genes (aim ~1000 genes/partition)
 
