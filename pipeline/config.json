@@ -3,7 +3,6 @@
   "QueryPath": "query_pathes.txt_withref.txt",
   "ScriptFolder": "/project2/mchaisso_100/walfred/projects/newphase/newBuild/scripts/",
   "TargetFolder": "groups",
-  "TempFolder": "snaketemp",
   "genelist": "./NovelLoci.bed",
   "ReferencePrefix": "NC_0609",
   "NumPartitions": 1
