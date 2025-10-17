@@ -31,7 +31,7 @@ partitioned sequence regions from pangenome assemblies and short-read queries.
 🛠️ Config Fields (example config.json):
 {
     "slurm": true,
-    "QueryPath": "query_pathes.txt",
+    "QueryPath": "query_pathes.txt_withrefs.txt",
     "ScriptFolder": "../scripts/",
     "TargetFolder": "groups/",
     "TempFolder": "snaketemp",
