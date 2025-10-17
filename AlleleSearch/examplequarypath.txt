@@ -1,4 +1,0 @@
-HG002_h2	/project/mchaisso_100/projects/HPRC/Assemblies_v2/HG002/maternal/assembly.orig.fasta
-HG002_h1	/project/mchaisso_100/projects/HPRC/Assemblies_v2/HG002/paternal/assembly.orig.fasta
-HG005_h2	/project/mchaisso_100/projects/HPRC/Assemblies_v2/HG005/maternal/assembly.orig.fasta
-HG005_h1	/project/mchaisso_100/projects/HPRC/Assemblies_v2/HG005/paternal/assembly.orig.fasta
