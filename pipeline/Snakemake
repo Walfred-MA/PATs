@@ -1,0 +1,562 @@
+#!/usr/bin/env python3
+
+#run: snakemake --cores 64 --keep-incomplete --wait-for-files --rerun-incomplete --latency-wait 100 --nt
+
+from pathlib import Path
+import os
+import subprocess
+import hashlib
+import json
+import shutil
+import sys
+
+# Load config
+with open("config.json") as f:
+    config = json.load(f)
+
+slurm       = config["slurm"]
+QueryPath   = config["QueryPath"]
+ScriptFolder= config["ScriptFolder"]
+TargetFolder= config["TargetFolder"]
+TempFolder  = config["TempFolder"]
+blockfile   = config["genelist"]
+blockmergesize = 80000
+Numrun      = config["NumPartitions"]
+Refprefix = config["ReferencePrefix"]
+
+def precheck():
+
+    # Tools to check
+    required_tools = [
+        "blastn", "makeblastdb",   # BLAST
+        "winnowmap",               # Winnowmap
+        "bedtools",                # Bedtools
+        "samtools",                # Samtools
+        "minimap2"                 # Minimap2
+    ]
+    
+    missing = []
+    for tool in required_tools:
+        if shutil.which(tool) is None:
+            missing.append(tool)
+            
+    if missing:
+        sys.stderr.write(f"\n[ERROR] Missing required tools: {', '.join(missing)}\n")
+        sys.stderr.write("Please install them and ensure they are in your PATH.\n")
+        sys.exit(1)
+    else:
+        print("[CHECK] All required tools found in PATH.")
+
+precheck()
+
+def preparetemps(TempFolder, blockfile, Numrun):
+    allgroups = Path(TempFolder) / "ALLInputs"
+    if not allgroups.exists():
+        cmd = f"cat {blockfile} | rev | cut -f1 | rev | sort | uniq | awk '{{print \"{TargetFolder}/\" $0}}' > {allgroups}"
+        os.system(cmd)
+
+    os.makedirs(TempFolder, exist_ok=True)
+    # skip the whole step if *any* chunk already exists
+    if any((Path(TempFolder) / f"{i}_Inputs.bed").exists() for i in range(Numrun)):
+        #print("Inputs_* files already present — skipping split.")
+        pass
+    else:
+        knownhash = dict()
+        handles = [(Path(TempFolder) / f"{i}_Inputs.bed").open("w") for i in range(Numrun)]
+        with open(blockfile) as src:
+            index = 0
+            for line in enumerate(src):
+                line = line.split()
+                hashnum = knownhash[line[4]] if line[4] in knownhash  else index % Numrun
+                knownhash[line[4]] = hashnum
+                handles[hashnum].write("\t".join(line) + "\n")
+                index += 1
+        for h in handles:
+            h.close()
+
+    for i in range(Numrun):
+        group_file = Path(TempFolder) / f"{i}_Groups"
+        faout_file = Path(TempFolder) / f"{i}_fa"
+        fastas_file = Path(TempFolder) / f"{i}_fastas"
+        hotspot_file = Path(TempFolder) / f"{i}_fastas.hotspots"
+        fastasout_file = Path(TempFolder) / f"{i}_fastas.output"
+        if not group_file.exists() or not fastas_file.exists() or not fastasout_file.exists() or not hotspot_file.exists() or not faout_file.exists() :
+            # Build Groups file
+            input_file = Path(TempFolder) / f"{i}_Inputs.bed"
+            cmd1 = f"cat {input_file} | rev | cut -f1 | rev | sort | uniq > {group_file}"
+            os.system(cmd1)
+            
+            cmd2 = f"awk '{{print \"{TargetFolder}/\"$1\"/\"$1\".fa\"}}' {group_file} > {faout_file}"
+            os.system(cmd2)
+            # Build Fastas file
+            cmd2 = f"awk '{{print \"{TargetFolder}/\"$1\"/\"$1\"_samples.fasta\"}}' {group_file} > {fastas_file}"
+            os.system(cmd2)
+
+            cmd3 = f"cat {fastas_file} | xargs -I [] bash -c 'folder=$(echo [] | rev | cut -d/ -f2- | rev); echo $folder/kmers/ ' > {fastasout_file} "
+            os.system(cmd3)
+            
+            cmd4 = f"cat {fastas_file} | xargs -I [] bash -c 'folder=$(echo [] | rev | cut -d/ -f2- | rev); echo $folder/hotspots/ ' > {hotspot_file} "
+            os.system(cmd4)
+
+queries = dict()
+with open(QueryPath, mode = 'r') as f:
+        for line in f:
+                line = line.split()
+                queries[line[0]] = line[1]
+
+scaffile    =  TempFolder + "/allscaf.txt"
+if not os.path.exists(scaffile):
+    os.system(f"cat {QueryPath} | cut -f2 | xargs -I [] bash -c 'cat [].fai >> {scaffile}'")
+   
+allgroups = Path(TempFolder) / "ALLInputs"
+preparetemps(TempFolder, blockfile, Numrun)
+        
+os.makedirs(TargetFolder, exist_ok=True)
+
+samples = [query for query in queries.keys()]
+
+chunks = [str(i) for i in range(Numrun) ]
+samples = [query for query in queries.keys()]
+rule all:
+        input:
+                inputs = ["{}/{}_prepare".format(TempFolder,chunk) for chunk in chunks ],
+                hotspots = ["{}/{}_hotspot".format(TempFolder,chunk) for chunk in chunks ],
+                aligns = ["{}/{}_align".format(TempFolder,sample) for sample in samples ],
+                kmers = ["{}/{}_kmers".format(TempFolder,chunk) for chunk in chunks ],
+                assems = ["{}/{}_assemqc".format(TempFolder,chunk) for chunk in chunks],
+                partsmall = ["{}/{}_small1finish".format(TempFolder,chunk) for chunk in chunks ],
+                partlarge = ["{}/{}_large1finish".format(TempFolder,chunk) for chunk in chunks ],
+                stage1 = ["{}/{}_stage1".format(TempFolder,chunk) for chunk in chunks ],
+                normsmall = ["{}/{}_normsmallfinish".format(TempFolder,chunk) for chunk in chunks ],
+                normlarge = ["{}/{}_normlargefinish".format(TempFolder,chunk) for chunk in chunks ],
+                bfixsmall = ["{}/{}_bfixsmallfinish".format(TempFolder,chunk) for chunk in chunks ],
+                bfixlargs = ["{}/{}_bfixlargefinish".format(TempFolder,chunk) for chunk in chunks ],
+                newkmers = ["{}/{}_newkmers".format(TempFolder,chunk) for chunk in chunks ],
+                bpartsmall = ["{}/{}_bpartsmallfinish".format(TempFolder,chunk) for chunk in chunks ],
+                bpartlarge = ["{}/{}_bpartlargefinish".format(TempFolder,chunk) for chunk in chunks ],
+                stage2 = ["{}/{}_stage2".format(TempFolder,chunk) for chunk in chunks ],
+                compiles = ["{}/{}_compile".format(TempFolder,chunk) for chunk in chunks ],
+            
+rule prepare:
+        input:
+                inputs = "{TempFolder}/{chunk}_Inputs.bed",
+        output:
+                touch="{TempFolder}/{chunk}_prepare"
+        params:
+                qpath=QueryPath,
+                script=ScriptFolder
+        resources:
+                mem_mb=20000,
+                slurm_extra="--mem=20G -c 10"
+        threads: 10
+        run:
+                shell ("python {params.script}/getblocks_frombed.py -i {input.inputs} -r {params.qpath} -o {TargetFolder}/ ")
+                shell ("cat {input.inputs} | rev |  cut -f1 | rev | xargs -I [] bash -c '    mv {TargetFolder}/[]/[].fa {TargetFolder}/[]/[]_origin.fa  ; {params.script}/runmakeblastdb -in {TargetFolder}/[]/[]_origin.fa -out {TargetFolder}/[]/[]_origin.fa_db ' ")
+            
+                shell ("python {params.script}/getblocks_frombed.py -i {input.inputs} -r {params.QueryPath_kmermask} -o {TargetFolder}/ ")
+                #shell ("cat {input.inputs} | rev |  cut -f1 | rev | xargs -I [] bash -c ' {params.script}/runmakeblastdb -in {TargetFolder}/[]/[].fa -out {TargetFolder}/[]/[].fa_db  ' ")
+                shell ("touch {output.touch} || true")
+            
+rule hotspots:
+        input:
+                blocks="{TempFolder}/{group}_fa",
+                prepare = "{TempFolder}/{group}_prepare"
+        output:
+                touch="{TempFolder}/{group}_hotspot"
+        params:
+                qpath=QueryPath,
+                script=ScriptFolder
+        resources:
+                mem_mb=125000,
+                slurm_extra="--mem=125G -c 62"
+        threads: 62
+        run:
+                shell("cat snaketemp/0_fastas.hotspots | xargs -I [] -P {threads} bash -c 'mkdir -p [] ' ")
+                shell("{params.script}/kmer_convertor8 -T {input.blocks} -O {input.blocks}.hotspots -I {params.qpath} -n {threads} -c 200 -s 1 -m 1")
+                shell("touch {output.touch}")
+            
+            
+all_hotspots = [f"{TempFolder}/{c}_hotspot" for c in chunks]
+rule align:
+        input:
+                hotspot = all_hotspots,
+                #start = "{TempFolder}/{sample}_start" ,
+        output:
+                touch = "{TempFolder}/{sample}_align" ,
+        params:
+                qpath = QueryPath,
+                script = ScriptFolder,
+                tgt    = allgroups,
+                fasta  = lambda wc: queries[wc.sample]
+        resources:
+                mem_mb=10000,
+                slurm_extra="--mem=10G -c 5 "
+        threads: 5
+        run:
+                shell("python {params.script}/hotspot_regions.py -i {params.tgt} -q {params.fasta} -s {wildcards.sample} -u " )
+                shell("touch {output.touch}")
+            
+all_aligns = [f"{TempFolder}/{c}_align" for c in samples]
+
+
+rule kmers:
+        input:
+                align = all_aligns,
+                blocks="{TempFolder}/{chunk}_fastas"
+        output:
+                touch="{TempFolder}/{chunk}_kmers"
+        params:
+                qpath=QueryPath,
+                script=ScriptFolder
+        resources:
+                mem_mb=125000,
+                slurm_extra="--mem=125G -c 62"
+        threads: 62
+        run:
+                shell("while read -r path; do [ -f $path ] || touch $path; done < {input.blocks}" )
+                shell("while read -r path; do [ -d $path ] || mkdir -p $path; done < {input.blocks}.output" )
+                shell("{params.script}/kmer_selector -T {input.blocks} -O {input.blocks}.output -I {params.qpath} -n {threads} ")
+            
+                shell(""" cat {input.blocks} | xargs -P {threads} -I [] bash -c " f=\$(dirname []) ; rm -f \"\$f/kmers\"/* 2>/dev/null || true  " """)
+            
+                shell("touch {output.touch}")
+rule assem:
+        input:
+                kmers="{TempFolder}/{chunk}_kmers",
+                ingroup = "{TempFolder}/{chunk}_fastas",
+        output:
+                finish = "{TempFolder}/{chunk}_assemqc",
+        params:
+                qpath = QueryPath,
+                script = ScriptFolder,
+                scafinfo = scaffile,
+        resources:
+                mem_mb=125000,
+                slurm_extra="--mem=125G -c 62 "
+        threads: 62
+        run:
+                shell(""" cat {input.ingroup} | xargs -P {threads} -I [] bash -c   ' python {params.script}/AssemQC.py -i []_samples.fasta  -s {params.scafinfo} -o []_qc.fa ; python {params.script}/GCfiltration.py -i []_kmers.txt -o []_kmers.txt_gc.txt -r []_qc.fa '  """)
+                shell ("touch {}".format(output.finish))
+            
+            
+rule partsmall:
+        input:
+                ingroup = "{TempFolder}/{chunk}_fastas",
+                assemqc = "{TempFolder}/{chunk}_assemqc",
+        output:
+                finish = "{TempFolder}/{chunk}_small1finish",
+        params:
+                qpath = QueryPath,
+                script = ScriptFolder
+        resources:
+                mem_mb=125000,
+                slurm_extra="--mem=125G -c 62 "
+        threads: 62
+        run:
+                processfile = input.ingroup+"_small1"
+                with open(input.ingroup, mode = 'r') as f, open(processfile, mode = 'w') as w:
+                        for line in f:
+                                inputfile = line.strip()
+                                oldkmerfile =  Path(inputfile + "_kmers.txt")
+                                if oldkmerfile.exists() and oldkmerfile.stat().st_size < 30000000:
+                                        w.write(inputfile+"\n")
+                                    
+                shell("""cat {processfile} | xargs -P {threads} -I [] bash -c ' f=$(dirname []) ; python {params.script}/partition.py -i []_qc.fa -k []_kmers.txt_gc.txt -o $f/partitions/ -n 1 ' """)
+                shell ("touch {}".format(output.finish))
+            
+            
+rule partlarge:
+        input:
+                ingroup = "{TempFolder}/{chunk}_fastas",
+                assemqc = "{TempFolder}/{chunk}_assemqc", 
+        output:
+                finish = "{TempFolder}/{chunk}_large1finish",
+        params:
+                qpath = QueryPath,
+                script = ScriptFolder
+        resources:
+                mem_mb=125000,
+                slurm_extra="--mem=125G -c 10 "
+        threads: 10
+        run:
+                processfile = input.ingroup+"_large1"
+                with open(input.ingroup, mode = 'r') as f, open(processfile, mode = 'w') as w:
+                        for line in f:
+                                inputfile = line.strip()
+                                oldkmerfile =  Path(inputfile + "_kmers.txt")
+                                if oldkmerfile.exists() and oldkmerfile.stat().st_size >= 30000000:
+                                        w.write(inputfile+"\n")
+                shell("""cat {processfile} | xargs -P {threads} -I [] bash -c ' f=$(dirname []) ; python {params.script}/partition.py -i []_qc.fa -k []_kmers.txt_gc.txt -o $f/partitions/ -n 1 ' """)
+                shell ("touch {}".format(output.finish))
+            
+            
+            
+rule stagesummary:
+        input:
+                ingroup = "{TempFolder}/{chunk}_fastas",
+                partsmall = "{TempFolder}/{chunk}_small1finish",
+                partlarge = "{TempFolder}/{chunk}_large1finish",
+        output:
+                finish = "{TempFolder}/{chunk}_stage1",
+        params:
+                qpath = QueryPath,
+                script = ScriptFolder
+        resources:
+                mem_mb=100,
+                slurm_extra="--mem=100M -c 1 "
+        threads: 1
+        run:
+                shell("""cat {input.ingroup} | xargs -P 1 -I [] bash -c ' cat []_qc.fa_partitions.list ' > {input.ingroup}_partitions.list """)
+                shell ("touch {}".format(output.finish))
+            
+rule getnormsmall:
+        input:
+                ingroup = "{TempFolder}/{chunk}_fastas",
+                stage1 = "{TempFolder}/{chunk}_stage1",
+        output:
+                finish = "{TempFolder}/{chunk}_normsmallfinish",
+        params:
+                qpath = QueryPath,
+                script = ScriptFolder
+        resources:
+                mem_mb=125000,
+                slurm_extra="--mem=125G -c 62 "
+        threads: 62
+        run:
+                processfile = input.ingroup+"_normsmall"
+                with open(input.ingroup+"_partitions.list", mode = 'r') as f, open(processfile, mode = 'w') as w:
+                        for line in f:
+                                inputfile = line.strip().split()[0]
+                                try:
+                                        samplenum = int(subprocess.check_output(f"grep '^>' {inputfile} | wc -l ", shell=True, text=True).strip())
+                                except:
+                                        samplenum = 0
+                                    
+                                if Path(inputfile).exists() and samplenum < 5000:
+                                        w.write(str(inputfile)+"\n")
+                                    
+                shell("""cat {processfile} | xargs -P {threads} -I [] bash -c ' python {params.script}/querylist_filterbykmer.py -i [] -k []_kmer.list -o []_filed.fa -l []_filed.fa_kmers.list -p 1 > []_filed.fa_info.txt' """)
+                shell ("touch {}".format(output.finish))
+            
+rule getnormlarge:
+        input:
+                ingroup = "{TempFolder}/{chunk}_fastas",
+                stage1 = "{TempFolder}/{chunk}_stage1",
+        output:
+                finish = "{TempFolder}/{chunk}_normlargefinish",
+        params:
+                qpath = QueryPath,
+                script = ScriptFolder
+        resources:
+                mem_mb=125000,
+                slurm_extra="--mem=125G -c 16 "
+        threads: 16
+        run:
+                processfile = input.ingroup+"_normlarge"
+                with open(input.ingroup+"_partitions.list", mode = 'r') as f, open(processfile, mode = 'w') as w:
+                        for line in f:
+                                inputfile = line.strip().split()[0]
+                                try:
+                                        samplenum = int(subprocess.check_output(f"grep '^>' {inputfile} | wc -l ", shell=True, text=True).strip())
+                                except:
+                                        samplenum = 0
+                                    
+                                if Path(inputfile).exists() and samplenum >= 5000:
+                                        w.write(str(inputfile)+"\n")
+                                    
+                shell("""cat {processfile} | xargs -P {threads} -I [] bash -c ' python {params.script}/querylist_filterbykmer.py -i [] -k []_kmer.list -o []_filed.fa -l []_filed.fa_kmers.list -p 1 > []_filed.fa_info.txt ' """)
+                shell ("touch {}".format(output.finish))
+            
+            
+rule fixbreakssmall:
+        input:
+                ingroup = "{TempFolder}/{chunk}_fastas",
+                stage1 = "{TempFolder}/{chunk}_normsmallfinish",
+        output:
+                finish = "{TempFolder}/{chunk}_bfixsmallfinish",
+        params:
+                qpath = QueryPath,
+                script = ScriptFolder,
+                refpref = Refprefix
+        resources:
+                mem_mb=250000,
+                slurm_extra="--mem=250G -c 50 "
+        threads: 50
+        run:
+                nprocess = threads//10
+                shell("""cat {input.ingroup}_normsmall | xargs -P {nprocess} -I [] bash -c '[ ! -s []_fixed.fa ] &&  (  thedir=$(dirname $(dirname $(dirname []))); filepath=$thedir/"$(basename $thedir).fa"; contig=$(head -1 $filepath | cut -f2); if [[ "$contig" != *"{params.refpref}"* ]]; then theprefix=$(echo "$contig" | cut -d"#" -f1-2); else theprefix={params.refpref}; fi;  python {params.script}/gfixbreaks.py -i []_filed.fa -o []_fixed.fa -q  {params.qpath}  -t 10 -r $theprefix ) ' """)
+                shell ("touch {}".format(output.finish))
+            
+rule fixbreakslarge:
+        input:
+                ingroup = "{TempFolder}/{chunk}_fastas",
+                stage1 = "{TempFolder}/{chunk}_normlargefinish",
+        output:
+                finish = "{TempFolder}/{chunk}_bfixlargefinish",
+        params:
+                qpath = QueryPath,
+                script = ScriptFolder,
+                refpref = Refprefix
+        resources:
+                mem_mb=250000,
+                slurm_extra="--mem=250G -c 50 "
+        threads: 50
+        run:
+                shell("""cat {input.ingroup}_normsmall | xargs -P 1 -I [] bash -c '[ ! -s []_fixed.fa ] && (  thedir=$(dirname $(dirname $(dirname []))); filepath=$thedir/"$(basename $thedir).fa"; contig=$(head -1 $filepath | cut -f2); if [[ "$contig" != *"{params.refpref}"* ]]; then theprefix=$(echo "$contig" | cut -d"#" -f1-2); else theprefix={params.refpref}; fi;  python {params.script}/gfixbreaks.py -i []_filed.fa -o []_fixed.fa -q  {params.qpath}  -t {threads} -r $theprefix ) ' """)
+                shell ("touch {}".format(output.finish))
+            
+rule newkmers:
+        input:
+                ingroup = "{TempFolder}/{chunk}_fastas",
+                partsmall = "{TempFolder}/{chunk}_bfixsmallfinish",
+                partlarge = "{TempFolder}/{chunk}_bfixlargefinish",
+        output:
+                finish = "{TempFolder}/{chunk}_newkmers",
+        params:
+                qpath = QueryPath,
+                script = ScriptFolder,
+                scafinfo = scaffile,
+        resources:
+                mem_mb=125000,
+                slurm_extra="--mem=125G -c 62"
+        threads: 62
+        run:
+                processfile = input.ingroup+"_bfix.list"
+                processfile_out = processfile +".output"
+            
+                with open(str(input.ingroup) + "_partitions.list", mode='r') as f, open(processfile, mode='w') as w1, open(processfile_out, mode='w') as w2:
+                        for line in f:
+                                inputfile = Path(line.strip().split()[0])
+                                fixlog = inputfile.with_name(inputfile.name + "_filed.fa_fixlog.txt")
+                                fixfile = inputfile.with_name(inputfile.name + "_fixed.fa")
+                                if fixfile.exists() and fixfile.stat().st_size > 10:
+                                    
+                                        wkfolder = inputfile.parent / "kmers"
+                                        os.makedirs(wkfolder, exist_ok=True)
+                                    
+                                        qcfiles = wkfolder.parent.parent.parent / f"{wkfolder.parent.parent.parent.name}_samples.fasta_qc.fa_QCfiltered.fa"
+                                    
+                                        if qcfiles.stat().st_size > 10:
+                                                shell("python {params.script}/addregions.py -i {inputfile}_fixed.fa -a {qcfiles} -o {inputfile}_fixed.fa2 -q {params.qpath} ")
+                                        else:
+                                                shell("ln -f {inputfile} {inputfile}_fixed.fa2")
+                                        w1.write(f"{inputfile}_fixed.fa2\n")
+                                        shell("mkdir  {wkfolder}  || true")
+                                        w2.write(f"{wkfolder}/\n")
+                                    
+                shell("{params.script}/kmer_selector -T {processfile} -O {processfile}.output -I {params.qpath} -n {threads} ")
+            
+                shell("""cat {processfile} | xargs -P {threads} -I [] bash -c '
+                        base=$(echo [] | sed "s/_fixed.fa2//")
+                        python {params.script}/GCfiltration.py -i []_kmers.txt -o "$base"_fixed.fa_qc.fa_kmers.txt -r []
+                        python {params.script}/AssemQC.py -i "$base"_fixed.fa -s {params.scafinfo} -o "$base"_fixed.fa_qc.fa' """)
+            
+                shell(""" cat {processfile} | xargs -P {threads} -I [] bash -c " f=\$(dirname []) ; rm -f \"\$f/kmers\"/* 2>/dev/null || true ; rm -f [] || true " """)
+            
+                shell("touch {output.finish}")
+            
+rule bfixpartsmall:
+        input:
+                ingroup = "{TempFolder}/{chunk}_fastas",
+                assemqc = "{TempFolder}/{chunk}_newkmers",
+        output:
+                finish = "{TempFolder}/{chunk}_bpartsmallfinish",
+        params:
+                qpath = QueryPath,
+                script = ScriptFolder
+        resources:
+                mem_mb=50000,
+                slurm_extra="--mem=50G -c 25 "
+        threads: 25
+        run:
+                processfile = input.ingroup+"_bfixsmall"
+                with open(input.ingroup+"_bfix.list", mode = 'r') as f, open(processfile, mode = 'w') as w:
+                        for line in f:
+                                inputfile = line.strip()
+                                oldkmerfile =  Path(inputfile + "_kmers.txt")
+                                if oldkmerfile.exists() and oldkmerfile.stat().st_size < 30000000:
+                                        w.write(inputfile[:-1]+"\n")
+                                    
+                #shell("""cat {processfile} | xargs -P {threads} -I [] bash -c ' f=$(dirname []) ; f2=$( echo [] | rev | cut -d/ -f 4 | rev ) ; python {params.script}/partition.py -i []_qc.fa -k []_qc.fa_kmers.txt -q "$f"/../../"$f2"_origin.fa  -o $f/partitions/  -n 1 -c 500 ' """)
+                shell("""cat {processfile} | xargs -P {threads} -I [] bash -c 'part="[]_qc.fa_partitions.list"; f=$(dirname []) ; [[ -s "$part" && $(wc -m < "$part") -gt 10 && -d "$f/partitions" && $(ls -A "$f/partitions" 2>/dev/null) ]] && echo "[SKIP] $part" && exit 0; f2=$(echo [] | rev | cut -d/ -f 4 | rev); python {params.script}/partition.py -i []_qc.fa -k []_qc.fa_kmers.txt -q "$f"/../../"$f2"_origin.fa -o $f/partitions/ -n 1 -c 500' """)
+                shell ("touch {}".format(output.finish))
+            
+            
+rule bfixpartlarge:
+        input:
+                ingroup = "{TempFolder}/{chunk}_fastas",
+                assemqc = "{TempFolder}/{chunk}_newkmers", 
+        output:
+                finish = "{TempFolder}/{chunk}_bpartlargefinish",
+        params:
+                qpath = QueryPath,
+                script = ScriptFolder
+        resources:
+                mem_mb=30000,
+                slurm_extra="--mem=30G -c 1 "
+        threads: 1
+        run:
+                processfile = input.ingroup+"_bfixlarge"
+                with open(input.ingroup+"_bfix.list", mode = 'r') as f, open(processfile, mode = 'w') as w:
+                        for line in f:
+                                inputfile = line.strip()
+                                oldkmerfile =  Path(inputfile + "_kmers.txt")
+                                if oldkmerfile.exists() and oldkmerfile.stat().st_size >= 30000000:
+                                        w.write(inputfile[:-1]+"\n")
+                shell("""cat {processfile} | xargs -P 1 -I [] bash -c ' part="[]_qc.fa_partitions.list" ; f=$(dirname []) ; [[ -s "$part" && $(wc -m < "$part") -gt 10  && -d "$f/partitions" && $(ls -A "$f/partitions" 2>/dev/null)  ]] && echo "[SKIP] $part" && exit 0; f2=$( echo [] | rev | cut -d/ -f 4 | rev ); python {params.script}/partition.py -i []_qc.fa -k []_qc.fa_kmers.txt -q "$f"/../../"$f2"_origin.fa  -o $f/partitions/  -n {threads} -c 500 ' """)
+                shell ("touch {}".format(output.finish))
+            
+rule stagesummary2:
+        input:
+                ingroup = "{TempFolder}/{chunk}_fastas",
+                partsmall = "{TempFolder}/{chunk}_bpartsmallfinish",
+                partlarge = "{TempFolder}/{chunk}_bpartlargefinish",
+        output:
+                finish = "{TempFolder}/{chunk}_stage2",
+        params:
+                qpath = QueryPath,
+                script = ScriptFolder
+        resources:
+                mem_mb=100,
+                slurm_extra="--mem=100M -c 1 "
+        threads: 1
+        run:
+                shell("""cat {input.ingroup}_bfixsmall | xargs -P 1 -I [] bash -c ' cat []_qc.fa_partitions.list ' > {input.ingroup}_bfixpartitions.list """)
+                shell("""cat {input.ingroup}_bfixlarge | xargs -P 1 -I [] bash -c ' cat []_qc.fa_partitions.list ' >> {input.ingroup}_bfixpartitions.list """)
+                shell("grep -v -F -f <(rev {input.ingroup}_bfix.list | cut -d_ -f2- | rev) {input.ingroup}_partitions.list >> {input.ingroup}_bfixpartitions.list")
+            
+                shell ("touch {}".format(output.finish))
+rule compile:
+        input:
+                ingroup = "{TempFolder}/{chunk}_fastas",
+                files = "{TempFolder}/{chunk}_stage2",
+        output:
+                matrix = "{TempFolder}/{chunk}_compile",
+        params:
+                qpath = QueryPath,
+                script = ScriptFolder
+        resources:
+                mem_mb=lambda wildcards, attempt: 20000 + ( 10000 *(attempt -1 )),
+                slurm_extra = lambda wildcards, attempt: "--mem="+str(20 + 10 * (attempt - 1) ) + "G -c 10",
+        threads: 10
+        run:
+                processfile1 = input.ingroup+"_bfixpartitionssmall.list"
+                processfile2 = input.ingroup+"_bfixpartitionslarge.list"
+                with open(input.ingroup+"_bfixpartitions.list", mode = 'r') as f, open(processfile1, mode = 'w') as w1,  open(processfile2, mode = 'w') as w2:
+                        for line in f:
+                                inputfile = line.strip().split()[0]
+                                try:
+                                        samplenum = int(subprocess.check_output(f"grep '^>' {inputfile} | wc -l ", shell=True, text=True).strip())
+                                except:
+                                        samplenum = 0
+                                if Path(inputfile).exists():
+                                        if samplenum < 5000:
+                                                w1.write(str(inputfile)+"\n")
+                                        else:
+                                                w2.write(str(inputfile)+"\n")
+                                            
+                shell("cat {} | xargs -P {} -I [] bash -c \"python {}/packedrun.py  []\"".format(processfile1, threads, ScriptFolder))
+            
+                threads2 = threads//10
+                shell("cat {} | xargs -P {} -I [] bash -c \"python {}/packedrun.py  []\"".format(processfile2,threads2, ScriptFolder))
+                shell("touch {output.matrix} ")
