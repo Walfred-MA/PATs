@@ -36,9 +36,9 @@ partitioned sequence regions from pangenome assemblies and short-read queries.
     "TargetFolder": "targets/",
     "TempFolder": "snaketemp",
     "genelist": "regions.bed",
-    "blockmergesize": 80000,
+    "blocksize": 80000,
     "NumPartitions": 10,
-    "ReferencePrefix": "CHM13#1"
+    "ReferencePrefix": "NC_0609"
 }
 
 ▶️ Example the pipeline running command:
