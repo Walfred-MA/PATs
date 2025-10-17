@@ -104,8 +104,8 @@ Descriptions:
 - ReferencePrefix: Prefix used in reference contigs (e.g., "NC_0609" or "chr")
 - NumPartitions: Number of partitions to divide genes (aim ~1000 genes/partition)
 
-3) Merge and index compiled k-mer matrices
-------------------------------------------
+D. Find, merge and index compiled k-mer matrices
+-----------------------------
 After Snakemake completes, run:
 
 cat tempfolder/*_bfixpartitions{small,large}.list | sed 's/$/_kmatrix.txt/' | sort -u > allpartitions.list
