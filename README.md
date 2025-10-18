@@ -23,11 +23,12 @@ Column 1: sampleName_h{1|2}
 Column 2: absolute or relative FASTA path
 
 Example (`query_pathes_withrefs.txt`):
+```
 apr001_h1    Assemblies/apr001.1.polished.fa
 apr001_h2    Assemblies/apr001.2.polished.fa
 CHM13_h1     References/CHM13.v2.0.fa
 HG38_h1      References/hg38.fa
-
+```
 Notes:
 - Use concise sample names (≤10 letters recommended).
 - `_h1` and `_h2` denote haplotypes; `_h1` is typically paternal.
