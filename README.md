@@ -80,15 +80,15 @@ See `pipeline/` for workflow logic, C++ utilities, and instructions.
 Compile all C++ tools as directed in that folder’s README.
 
 Run example:
-snakemake --cores 32 --use-conda -s snakemake/Snakefile
+```
+snakemake -k  --cluster "sbatch --account=mchaisso_100 --partition=qcb --time=500:00:00 {resources.slurm_extra}" --default-resources "mem_mb=3000" --jobs 500  --rerun-incomplete  --notemp --latency-wait 100 --resources mem_gb=1000
+```
 
-SLURM example:
-snakemake --profile slurm -s snakemake/Snakefile
-
-(If using JSON config, the Snakemake profile or wrappers may load it.)
+It requires a JSON config, the Snakemake profile or wrappers will load it.
 
 2) JSON configuration (example + field descriptions)
 -----------------------------------------------------
+```
 Example JSON:
 {
   "slurm": " --account=<acct> --time 50:00:00 --partition=qcb ",
@@ -100,8 +100,10 @@ Example JSON:
   "ReferencePrefix": "NC_0609",
   "NumPartitions": 1
 }
+```
 
 Descriptions:
+```
 - slurm:         SLURM job submission args
 - QueryPath:     TSV of assemblies/references
 - ScriptFolder:  Path to scripts folder
@@ -111,23 +113,31 @@ Descriptions:
 - blocksize:     the max sequence length used for pangenome alleles, larger will be splitted, default: 80,000, 
 - ReferencePrefix: Prefix used in reference contigs (e.g., "NC_0609" or "chr")
 - NumPartitions: Number of partitions to divide genes (aim ~1000 genes/partition)
+```
 
 D. Find, merge and index compiled k-mer matrices
 -----------------------------
 After Snakemake completes, run:
 
+```
 cat tempfolder/*_bfixpartitions{small,large}.list | sed 's/$/_kmatrix.txt/' | sort -u > allpartitions.list
+```
+
 Then each line will be each compiled matrix
 
 Then concatenate all matrices:
+```
 xargs -a allpartitions.list -I {} bash -c '[[ -f "{}" ]] && cat "{}"' > All_matrix.txt
-
+```
 Index the matrix:
+```
 python scripts/matrixindex.py -i All_matrix.txt -g <genes.gff3> -r 1
-
+```
 This creates:
+```
 - All_matrix.txt         → merged matrix
 - All_matrix.txt.index   → index file
+```
 
 4) Tips & Gotchas
 ------------------
