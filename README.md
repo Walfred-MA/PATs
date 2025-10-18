@@ -138,6 +138,7 @@ This creates:
 - All_matrix.txt         → merged matrix
 - All_matrix.txt.index   → index file
 ```
+Note: You might need a background kmer file, which can be obtained from Ctyper's GitHub site, and you may name it as All_matrix.txt.bgd for your convenient
 
 4) Tips & Gotchas
 ------------------
