@@ -47,24 +47,32 @@ This step generates the masked FASTAs used downstream. You may skip if you have 
 C. Define your target regions (genes) as a BED file
 ---------------------------------------------------
 Use the helper script to extract per-gene BED from a GFF3:
+```
 python tools/gff_toGeneBed.py -i <genes.gff3> -o genes.bed
 
 Optional arguments:
   -g X   Select specific genes (file or comma-list). Supports wildcards like SMN*.
   -e     Add merged exon intervals as `Target=...` in column 5.
   -a N   Add N bp flanking anchors to each gene region.
-
+```
 Help:
+```
 python tools/gff_toGeneBed.py -h
-
+```
 Accepted BED formats:
   4-column (gene-level):
+  ```
     chrom  start  end  gene_or_group
+  ```
   5-column (recommended):
+  ```
     chrom  start  end  gene_or_group  Target=s1-e1,s2-e2,...
+  ```
 
 Example:
+```
 chr5_GL339449v2_alt 456848 485731 SMN2 Target=456848-457609,457774-458352
+```
 
 D. Run the Snakemake workflow
 -----------------------------
