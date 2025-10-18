@@ -15,8 +15,6 @@ the Snakemake workflow.
 - PAT repository layout with subfolders:
   masking/  tools/  snakemake/  scripts/
 
-1) Prepare your input files
----------------------------
 
 A. Create the assemblies/reference path list (TSV)
 --------------------------------------------------
