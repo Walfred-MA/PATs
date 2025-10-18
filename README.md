@@ -42,7 +42,7 @@ Make sure these prefixes match your FASTA headers.
 B. Repeat-mask all references and assemblies
 --------------------------------------------
 Use the scripts in `masking/` (see `masking/readme.txt` for details).
-This step generates the masked FASTAs used downstream.
+This step generates the masked FASTAs used downstream. You may skip if you have already done so
 
 C. Define your target regions (genes) as a BED file
 ---------------------------------------------------
