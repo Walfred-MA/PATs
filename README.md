@@ -8,7 +8,7 @@ both functional annotation and NGS genotyping. The pipeline consumes:
 Major stages: input preparation, masking, target extraction, and running
 the Snakemake workflow.
 
-0) Requirements (high level)
+Requirements (high level)
 ----------------------------
 - Linux environment with bash, Python 3, samtools, and Snakemake
 - Compilers/tools for C++ utilities in `snakemake/` (see that folder’s README)
