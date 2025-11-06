@@ -36,7 +36,7 @@ def ensure_binaries_exist(ScriptFolder):
         "kmerselector": "kmerselector",
         "kmerpartition": "kmerpartition",
         "kmernorm": "kmernorm",
-        "KmerStrd": "Kmerstrd",
+        "KmerStrd": "kmerstrd",
         "kmertree": "kmertree"
     }
 

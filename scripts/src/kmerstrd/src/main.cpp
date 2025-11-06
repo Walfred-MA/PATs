@@ -1,4 +1,3 @@
-#include <cstdint>
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -10,6 +9,7 @@
 #include <cctype>
 #include <cmath>
 #include <sstream>
+#include <cstdint>
 
 constexpr int KMER_SIZE = 31;
 constexpr uint64_t KMER_MASK = (1ULL << (2 * (KMER_SIZE - 1)));
@@ -82,12 +82,87 @@ public:
                    
             }
         }
-        
+            
         totalsign = (totalsign >= 0) ? std::max(1, totalsign) : totalsign;
         for (int index = 0; index < unsigned_number; index++)
         {
             int strand = (unsigned_kmers[index] >= 0) ? 1 : -1;
             kmersign[abs(unsigned_kmers[index])] = strand * ((totalsign >= 0) ? 1 : -1);
+        }
+        
+        return totalsign;
+    }
+    
+    int annotate_passive(const std::string& seq, int totalsign_hint) {
+        int totalsign = totalsign_hint;
+        uint64_t forward_k = 0, reverse_k = 0;
+        int size = 0;
+        
+        uint32_t unsigned_number = 0;
+        
+        for (char base : seq) {
+            int val = base_to_int(base);
+            if (val == -1) {
+                size = 0;
+                forward_k = reverse_k = 0;
+                continue;
+            }
+            
+            if (size >= KMER_SIZE) {
+                forward_k = ((forward_k % KMER_MASK) << 2) + val;
+                reverse_k = (reverse_k >> 2) + ((3 - val) * KMER_MASK);
+            } else {
+                forward_k = (forward_k << 2) + val;
+                reverse_k += (3 - val) << (2 * size);
+                size++;
+            }
+            
+            if (size >= KMER_SIZE) {
+                uint64_t canonical = std::max(forward_k, reverse_k);
+                int strand = (canonical == forward_k) ? 1 : -1;
+                if (kmersign.count(canonical))
+                {
+                    totalsign += strand * kmersign[canonical];
+                }
+                   
+            }
+        }
+            
+        totalsign = (totalsign >= 0) ? std::max(1, totalsign) : totalsign;
+
+        return totalsign;
+    }
+    
+    int kmerassign(const std::string& seq, int totalsign_hint = 1) {
+        int totalsign = totalsign_hint;
+        uint64_t forward_k = 0, reverse_k = 0;
+        int size = 0;
+        
+        uint32_t unsigned_number = 0;
+        
+        for (char base : seq) {
+            int val = base_to_int(base);
+            if (val == -1) {
+                size = 0;
+                forward_k = reverse_k = 0;
+                continue;
+            }
+            
+            if (size >= KMER_SIZE) {
+                forward_k = ((forward_k % KMER_MASK) << 2) + val;
+                reverse_k = (reverse_k >> 2) + ((3 - val) * KMER_MASK);
+            } else {
+                forward_k = (forward_k << 2) + val;
+                reverse_k += (3 - val) << (2 * size);
+                size++;
+            }
+            
+            if (size >= KMER_SIZE) {
+                uint64_t canonical = std::max(forward_k, reverse_k);
+                int strand = (canonical == forward_k) ? 1 : -1;
+                
+                if (abs(kmersign[canonical] + totalsign_hint * strand) <= 127 ) kmersign[canonical] += totalsign_hint * strand;
+            }
         }
         
         return totalsign;
@@ -141,19 +216,39 @@ int main(int argc, char** argv) {
         return 1;
     }
     
-    std::string input_file, output_file;
-
+    std::string input_file, output_file, ref_file;
+    
     for (int i = 1; i < argc - 1; ++i) {
         std::string arg = argv[i];
         if (arg == "-i") {
             input_file = argv[++i];
         } else if (arg == "-o") {
             output_file = argv[++i];
+        } else if (arg == "-r") {
+            ref_file = argv[++i];
+        }
+    }
+    
+    KmerAnnotation annotator;
+    if (!ref_file.empty()){
+        auto refs = read_fasta(ref_file);
+        for (auto& entry : refs) {
+            annotator.kmerassign(entry.seq, 1);
+        }
+        
+        for (auto &kv : annotator.kmersign) {
+            if (kv.second > 0) {
+                kv.second = 1;
+            } else if (kv.second < 0) {
+                kv.second = -1;
+            } else {
+                kv.second = 0;
+            }
         }
     }
     
     auto entries = read_fasta(input_file);
-    KmerAnnotation annotator;
+    
     
     std::map<std::string, int> contig_sign;
     std::unordered_map<std::string, std::string> contig_from_name;
@@ -181,12 +276,27 @@ int main(int argc, char** argv) {
     });
     
     std::map<std::string, int> name_sign;
-    for (auto& entry : sorted_entries) {
+    
+    for (size_t i = 0; i + 1 < sorted_entries.size(); ++i) {
+        auto& entry = sorted_entries[i];
         std::string contig = contig_from_name[entry.name];
+
         int sign = annotator.annotate(entry.seq, std::min(500, contig_sign[contig] / 100));
         contig_sign[contig] += sign;
         name_sign[entry.name] = sign;
     }
+    
+    
+    if (!sorted_entries.empty()) {
+        auto& entry = sorted_entries.back();
+        std::string contig = contig_from_name[entry.name];
+
+        // special handling for last element
+        int sign = annotator.annotate_passive(entry.seq, std::min(500, contig_sign[contig] / 100));
+        contig_sign[contig] += sign;
+        name_sign[entry.name] = sign;
+    }
+    
     
     for (auto& entry : entries) {
         int sign = name_sign[entry.name];
@@ -201,6 +311,13 @@ int main(int argc, char** argv) {
             fields.push_back(token);
         }
 
+        // Adjust strand based on sign
+        if (sign < 0) {
+            entry.seq = reverse_complement(entry.seq);
+        } else {
+        }
+
+
         if (fields.size() >= 2) {
             // Remove old strand from second field if exists
             if (!fields[1].empty() && (fields[1].back() == '+' || fields[1].back() == '-')) {
@@ -208,9 +325,7 @@ int main(int argc, char** argv) {
                 fields[1].pop_back();
             }
 
-            // Adjust strand based on sign
             if (sign < 0) {
-                entry.seq = reverse_complement(entry.seq);
                 strand = (strand == "-" ? "+" : "-");
             } else {
                 strand = (strand == "-" ? "-" : "+");

@@ -61,16 +61,11 @@ void run(std::vector<std::string> &inputfiles, std::vector<std::string>& targetf
     if (mode == 1 || mode == 0)
     {
 
-        kmer_counter<dictsize> counter(kmer_size);
+        kmer_counter<dictsize> counter;
 
-        for (std::string targetfile: kmerfiles)
+        if (kmerfiles.size())
         {
-
-            if (targetfile.size())
-            {
-                counter.read_target(targetfile.c_str());
-            }
-            
+            counter.read_targets(kmerfiles);
         }
         
         counter.read_files(inputfiles, outputfiles, prefixes, targetfiles, nthreads);

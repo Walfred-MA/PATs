@@ -6,7 +6,7 @@ LDFLAGS = -lz -pthread
 # Sources and target
 SRCS = src/fasta.cpp src/gzfile.cpp src/KmerCounter.cpp src/KmerFilter.cpp src/KmerHash.cpp src/KmerStruct.cpp src/main.cpp
 OBJS = $(SRCS:.cpp=.o)
-TARGET = kmerselector
+TARGET = kmer_selector
 
 # Default rule
 all: $(TARGET)

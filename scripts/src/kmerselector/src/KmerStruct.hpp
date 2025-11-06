@@ -22,6 +22,7 @@
 #include <thread>
 #include <atomic>
 #include <zlib.h>
+#include "config.hpp"
 
 using namespace std;
 
@@ -33,8 +34,7 @@ typedef unsigned char  uint8;
 
 extern bool ifmask;
 
-#define large_prime 2147483647
-#define klen 31
+
 
 struct hash_128 {
     
