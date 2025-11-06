@@ -156,3 +156,47 @@ Questions / Issues
 - For BED help: python tools/gff_toGeneBed.py -h
 - If problems arise, double-check FASTA paths and index files.
 
+E. Installing Required Scripts via install/install.py
+-----------------------------------------------------
+
+We provide an automatic script to help set up the required binaries and Python dependencies for the PAT toolkit.
+
+Requirements:
+- Python 3.10
+- A valid Conda environment (recommended)
+- C++ compiler (g++ ≥ 8)
+- Internet access to install dependencies via conda
+
+How to Use:
+
+1. Create and activate a Python 3.10 environment (if not already done):
+   conda create -n patenv python=3.10 -y
+   conda activate patenv
+
+2. Install required dependencies:
+   conda install -y htslib=1.21 eigen zlib
+
+3. Run the install script from the root of the PAT repository:
+   python install/install.py --prefix /path/to/PAT/scripts/
+
+   Replace /path/to/PAT/scripts/ with the absolute path to your ScriptFolder. This should match what you set in the Snakemake config JSON.
+
+   The script will:
+   - Compile all C++ binaries (kmercounter8, kmer_selector, etc.)
+   - Use the active conda environment's include/ and lib/ directories for htslib/sam.h and zlib.h
+   - Copy compiled binaries into the provided --prefix folder
+
+4. You should see output like:
+   [BUILD] kmercounter8 not found, attempting to build from /.../src/kmercounter
+   [DONE] Copied kmercounter8 → /.../scripts/kmercounter8
+
+Troubleshooting:
+
+- If you see errors like:
+     fatal error: zlib.h: No such file or directory
+  or
+     fatal error: htslib/sam.h: No such file or directory
+
+  then your environment may be missing required headers. Try:
+     conda install -y htslib=1.21 zlib
+

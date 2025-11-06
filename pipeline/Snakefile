@@ -9,6 +9,7 @@ import hashlib
 import json
 import shutil
 import sys
+import shutil as _shutil
 
 # Load config
 with open("config.json") as f:
@@ -25,49 +26,70 @@ Refprefix = config["ReferencePrefix"]
 TempFolder     = config.get("TempFolder", "snaketemp")
 blockmergesize = config.get("blocksize", 80000)
 
-def ensure_binaries_exist(ScriptFolder):
+def ensure_binaries_exist(ScriptFolder: Path):
     """
     Ensure required binaries are compiled and present in ScriptFolder.
     If missing, build them from their respective subfolders.
     """
 
+    ScriptFolder = Path(ScriptFolder)
     tools = {
         "kmercounter8": "kmercounter",
-        "kmerselector": "kmerselector",
+        "kmer_selector": "kmerselector",
         "kmerpartition": "kmerpartition",
         "kmernorm": "kmernorm",
         "KmerStrd": "kmerstrd",
-        "kmertree": "kmertree"
+        "kmertree": "kmertree",
     }
 
     for binary_name, subfolder_name in tools.items():
-        binary_path = Path(ScriptFolder) / binary_name
+        binary_path = ScriptFolder / binary_name
 
         if binary_path.exists():
+            print(f"[CHECK] Binary found: {binary_path}")
             continue
 
         # Try to build
-        source_folder = Path(ScriptFolder)/"src" / subfolder_name
+        source_folder = ScriptFolder / "src" / subfolder_name
         print(f"[BUILD] {binary_name} not found, attempting to build from {source_folder}...")
 
         if not source_folder.exists():
             sys.stderr.write(f"[ERROR] Source folder not found: {source_folder}\n")
             sys.exit(1)
 
+        # Inherit env and inject conda include/lib paths if available
+        env = os.environ.copy()
+        conda_prefix = env.get("CONDA_PREFIX")
+        if conda_prefix:
+            inc = f"{conda_prefix}/include"
+            lib = f"{conda_prefix}/lib"
+
+            # Make the compiler see htslib/sam.h and zlib.h in $CONDA_PREFIX/include
+            for var in ("CPLUS_INCLUDE_PATH", "CPATH"):
+                env[var] = inc + (":" + env[var] if var in env and env[var] else "")
+
+            # Make linker see libhts, libz in $CONDA_PREFIX/lib
+            for var in ("LIBRARY_PATH", "LD_LIBRARY_PATH"):
+                env[var] = lib + (":" + env[var] if var in env and env[var] else "")
+
+            print(f"[INFO] Using CONDA_PREFIX={conda_prefix} for includes/libs")
+
         try:
-            subprocess.run(["make"], cwd=source_folder, check=True)
-        except subprocess.CalledProcessError as e:
+            subprocess.run(["make"], cwd=source_folder, check=True, env=env)
+        except subprocess.CalledProcessError:
             sys.stderr.write(f"[ERROR] Failed to build {binary_name} in {source_folder}\n")
             sys.exit(1)
 
         # After build, move the binary to ScriptFolder if it exists in the subfolder
         built_binary = source_folder / binary_name
         if built_binary.exists():
-            shutil.copy2(built_binary, binary_path)
+            _shutil.copy2(built_binary, ScriptFolder)
             print(f"[DONE] Copied {binary_name} → {binary_path}")
         else:
             sys.stderr.write(f"[ERROR] Binary {binary_name} not found after build in {source_folder}\n")
             sys.exit(1)
+
+
 
 def precheck():
 
@@ -265,7 +287,7 @@ rule kmers:
         run:
                 shell("while read -r path; do [ -f $path ] || touch $path; done < {input.blocks}" )
                 shell("while read -r path; do [ -d $path ] || mkdir -p $path; done < {input.blocks}.output" )
-                shell("{params.script}/kmerselector -T {input.blocks} -O {input.blocks}.output -I {params.qpath} -n {threads} ")
+                shell("{params.script}/kmer_selector -T {input.blocks} -O {input.blocks}.output -I {params.qpath} -n {threads} ")
             
                 shell(""" cat {input.blocks} | xargs -P {threads} -I [] bash -c " f=\$(dirname []) ; rm -f \"\$f/kmers\"/* 2>/dev/null || true  " """)
             
@@ -452,7 +474,7 @@ rule fixbreakslarge:
                 slurm_extra="--mem=250G -c 50 "
         threads: 50
         run:
-                shell("""cat {input.ingroup}_normsmall | xargs -P 1 -I [] bash -c '[ ! -s []_fixed.fa ] && (  thedir=$(dirname $(dirname $(dirname []))); filepath=$thedir/"$(basename $thedir).fa"; contig=$(head -1 $filepath | cut -f2); if [[ "$contig" != *"{params.refpref}"* ]]; then theprefix=$(echo "$contig" | cut -d"#" -f1-2); else theprefix={params.refpref}; fi;  python {params.script}/gfixbreaks.py -i []_filed.fa -o []_fixed.fa -q  {params.qpath}  -t {threads} -r $theprefix ) ' """)
+                shell("""cat {input.ingroup}_normlarge | xargs -P 1 -I [] bash -c '[ ! -s []_fixed.fa ] && (  thedir=$(dirname $(dirname $(dirname []))); filepath=$thedir/"$(basename $thedir).fa"; contig=$(head -1 $filepath | cut -f2); if [[ "$contig" != *"{params.refpref}"* ]]; then theprefix=$(echo "$contig" | cut -d"#" -f1-2); else theprefix={params.refpref}; fi;  python {params.script}/gfixbreaks.py -i []_filed.fa -o []_fixed.fa -q  {params.qpath}  -t {threads} -r $theprefix ) ' """)
                 shell ("touch {}".format(output.finish))
             
 rule newkmers:
@@ -494,7 +516,7 @@ rule newkmers:
                                         shell("mkdir  {wkfolder}  || true")
                                         w2.write(f"{wkfolder}/\n")
                                     
-                shell("{params.script}/kmerselector -T {processfile} -O {processfile}.output -I {params.qpath} -n {threads} ")
+                shell("{params.script}/kmer_selector -T {processfile} -O {processfile}.output -I {params.qpath} -n {threads} ")
             
                 shell("""cat {processfile} | xargs -P {threads} -I [] bash -c '
                         base=$(echo [] | sed "s/_fixed.fa2//")
