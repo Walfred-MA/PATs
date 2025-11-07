@@ -567,10 +567,7 @@ void kmer_counter<dictsize>::read_file()
             
             fasta targetfile(targetfiles[j].c_str());
             
-            if (!count_target(targetfile,prefix, target_map_nt))
-            {
-                target_map_nt.clear();
-            }
+            count_target(targetfile,prefix, target_map_nt);
             
             auto outputfile = outputfiles[j] + prefix;
             
