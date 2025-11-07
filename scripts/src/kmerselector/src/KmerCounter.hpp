@@ -77,7 +77,7 @@ public:
     void read_counttarget(std::string &infile);
     
     template <class typefile>
-    void count_target(typefile &fastafile, string prefix, kmer32_dict_nt &target_map_nt);
+    bool count_target(typefile &fastafile, string prefix, kmer32_dict_nt &target_map_nt);
     
     void read_targets(std::vector<std::string>& infiles);
         
@@ -378,7 +378,7 @@ bool static inline isTarget(const std::string& strLine, const std::string& prefi
 
 template <int dictsize>
 template <class typefile>
-void kmer_counter<dictsize>::count_target(typefile &fastafile, string prefix, kmer32_dict_nt &target_map_nt)
+bool kmer_counter<dictsize>::count_target(typefile &fastafile, string prefix, kmer32_dict_nt &target_map_nt)
 {
     
     int current_size = 0;
@@ -386,6 +386,7 @@ void kmer_counter<dictsize>::count_target(typefile &fastafile, string prefix, km
     kmer_int current_kmer = 0;
     kmer_int reverse_kmer = 0;
     
+    bool iffind = 0;
     //uint64_t ifmasked = 0;
     //int num_masked = 0 ;
     std::string StrLine;
@@ -406,7 +407,9 @@ void kmer_counter<dictsize>::count_target(typefile &fastafile, string prefix, km
         }
         
         if (!istarget) continue;
-                
+        
+        iffind = 1;
+        
         for (auto base: StrLine)
         {
             if (base == '\0') break;
@@ -428,6 +431,7 @@ void kmer_counter<dictsize>::count_target(typefile &fastafile, string prefix, km
         
     fastafile.Close();
     
+    return iffind;
 };
  
 template <int dictsize>
@@ -563,11 +567,15 @@ void kmer_counter<dictsize>::read_file()
             
             fasta targetfile(targetfiles[j].c_str());
             
-            count_target(targetfile,prefix, target_map_nt);
+            if (!count_target(targetfile,prefix, target_map_nt))
+            {
+                target_map_nt.clear();
+            }
             
             auto outputfile = outputfiles[j] + prefix;
             
             write(outputfile.c_str(), kmer_hash, samplevecs, target_map_nt);
+            
         }
         
         free(samplevecs);
