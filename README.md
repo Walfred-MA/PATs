@@ -89,7 +89,7 @@ This step generates the masked FASTAs used downstream. You may skip if you have 
 
 D. Define your target regions (genes) as a BED file
 ---------------------------------------------------
-Use the helper script to extract per-gene BED from a GFF3:
+Use the helper script to extract per-gene BED from a GFF3 (gene annotation file, for example, some gff3 files can be found: https://www.gencodegenes.org/):
 ```
 python tools/gff_toGeneBed.py -i <genes.gff3> -o genes.bed
 
