@@ -142,6 +142,7 @@ def clamp_to_fai(query, chr_name, start0, end0):
 	try:
 		lengths = load_fai_lengths(query)
 	except FileNotFoundError:
+		print("Missing: ", query)
 		# If no .fai, we cannot validate; treat as not ok.
 		return (False, start0, end0)
 	if chr_name not in lengths:

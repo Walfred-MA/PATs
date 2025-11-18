@@ -23,16 +23,6 @@ def _safe_rule_eq(self, other):
 _Rule.__eq__ = _safe_rule_eq
 # --- end patch ---
 
-from snakemake.shell import shell as _original_shell
-
-def patched_shell(cmd, *args, **kwargs):
-    CONDA_PREFIX = os.environ.get("CONDA_PREFIX", "")
-    export_cmd = f'export LD_LIBRARY_PATH="{CONDA_PREFIX}/lib:$LD_LIBRARY_PATH"; '
-    return _original_shell(export_cmd + cmd, *args, **kwargs)
-
-import snakemake.shell
-snakemake.shell.shell = patched_shell
-
 # Load config
 with open("config.json") as f:
     config = json.load(f)
@@ -571,8 +561,7 @@ rule bfixpartsmall:
                                 if oldkmerfile.exists() and oldkmerfile.stat().st_size < 30000000:
                                         w.write(inputfile[:-1]+"\n")
                                     
-                #shell("""cat {processfile} | xargs -P {threads} -I [] bash -c ' f=$(dirname []) ; f2=$( echo [] | rev | cut -d/ -f 4 | rev ) ; python {params.script}/partition.py -i []_qc.fa -k []_qc.fa_kmers.txt -q "$f"/../../"$f2"_origin.fa  -o $f/partitions/  -n 1 -c 500 ' """)
-                shell("""cat {processfile} | xargs -P {threads} -I [] bash -c 'part="[]_qc.fa_partitions.list"; f=$(dirname []) ; [[ -s "$part" && $(wc -m < "$part") -gt 10 && -d "$f/partitions" && $(ls -A "$f/partitions" 2>/dev/null) ]] && echo "[SKIP] $part" && exit 0; f2=$(echo [] | rev | cut -d/ -f 4 | rev); python {params.script}/partition.py -i []_qc.fa -k []_qc.fa_kmers.txt -q "$f"/../../"$f2"_origin.fa -o $f/partitions/ -n 1 -c 500' """)
+                shell("""cat {processfile} | xargs -P {threads} -I [] bash -c 'part="[]_qc.fa_partitions.list"; f=$(dirname []) ; f2=$(echo [] | rev | cut -d/ -f 4 | rev); python {params.script}/partition.py -i []_qc.fa -k []_qc.fa_kmers.txt -q "$f"/../../"$f2"_origin.fa -o $f/partitions/ -n 1 -c 500' """)
                 shell ("touch {}".format(output.finish))
             
             
@@ -597,7 +586,7 @@ rule bfixpartlarge:
                                 oldkmerfile =  Path(inputfile + "_kmers.txt")
                                 if oldkmerfile.exists() and oldkmerfile.stat().st_size >= 30000000:
                                         w.write(inputfile[:-1]+"\n")
-                shell("""cat {processfile} | xargs -P 1 -I [] bash -c ' part="[]_qc.fa_partitions.list" ; f=$(dirname []) ; [[ -s "$part" && $(wc -m < "$part") -gt 10  && -d "$f/partitions" && $(ls -A "$f/partitions" 2>/dev/null)  ]] && echo "[SKIP] $part" && exit 0; f2=$( echo [] | rev | cut -d/ -f 4 | rev ); python {params.script}/partition.py -i []_qc.fa -k []_qc.fa_kmers.txt -q "$f"/../../"$f2"_origin.fa  -o $f/partitions/  -n {threads} -c 500 ' """)
+                shell("""cat {processfile} | xargs -P 1 -I [] bash -c ' part="[]_qc.fa_partitions.list" ; f=$(dirname []) ; f2=$( echo [] | rev | cut -d/ -f 4 | rev ); python {params.script}/partition.py -i []_qc.fa -k []_qc.fa_kmers.txt -q "$f"/../../"$f2"_origin.fa  -o $f/partitions/  -n {threads} -c 500 ' """)
                 shell ("touch {}".format(output.finish))
             
 rule stagesummary2:

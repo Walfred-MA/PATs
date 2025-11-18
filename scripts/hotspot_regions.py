@@ -82,7 +82,7 @@ def run_blast(fasta: pathlib.Path, db: pathlib.Path) -> None:
     out = f"{fasta}_blast.out"
     cmd = f"runblastn -query {fasta} -db {db}.fa_db -perc_identity {BLAST_IDENTITY}  -outfmt 17 -num_threads {BLAST_THREADS} -out {out}"    
     os.system(
-        f"bash {script_dir}/runblastn -query {fasta} -db {db}.fa_db "
+        f"bash {script_dir}/runblastn -query {fasta} -db {db}_origin.fa_db "
         f"-perc_identity {BLAST_IDENTITY}  "
         f"-outfmt 17 -num_threads {BLAST_THREADS} -out - > {out}"
     )

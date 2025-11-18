@@ -3,7 +3,7 @@
   "QueryPath": "query_pathes.txt_example.txt",
   "ScriptFolder": "../scripts/",
   "TargetFolder": "groups",
-  "genelist": "./SMNexample.txt",
+  "genelist": "./SMNexample.bed",
   "ReferencePrefix": "chr",
   "NumPartitions": 1
 }
