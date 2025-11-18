@@ -11,6 +11,44 @@ import shutil as _shutil  # avoid name collision with std shutil above
 # =========================
 #  Version helpers
 # =========================
+def ensure_conda_ld_library_hook():
+    """
+    Create a conda activate.d hook so that every time this environment is
+    activated, LD_LIBRARY_PATH is updated to include $CONDA_PREFIX/lib.
+
+    This fixes runtime errors like:
+      error while loading shared libraries: libhts.so.3: cannot open shared object file
+    """
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if not conda_prefix:
+        print("[WARN] CONDA_PREFIX not set; skipping LD_LIBRARY_PATH activate hook.")
+        print("       Run install.py from inside the conda env you use for PATs.")
+        return
+
+    act_dir = Path(conda_prefix) / "etc" / "conda" / "activate.d"
+    try:
+        act_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        print(f"[WARN] Could not create activate.d directory {act_dir}: {e}")
+        return
+
+    hook_path = act_dir / "pats_ldpath.sh"
+    script = 'export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"\n'
+
+    try:
+        hook_path.write_text(script)
+    except Exception as e:
+        print(f"[WARN] Could not write activate hook {hook_path}: {e}")
+        return
+
+    # Make it executable (not strictly required, but nice)
+    try:
+        os.chmod(hook_path, 0o755)
+    except Exception:
+        pass
+
+    print(f"[CHECK] Wrote conda activate hook: {hook_path}")
+    print("        LD_LIBRARY_PATH will include $CONDA_PREFIX/lib whenever this env is activated.")
 
 def ensure_python_version():
     required = (3, 10)
@@ -370,6 +408,7 @@ def main():
     ensure_gcc_version()
     ensure_conda_deps()      # htslib/eigen/snakemake
     ensure_conda_bio_tools() # blast / winnowmap / bedtools / samtools / minimap2
+    ensure_conda_ld_library_hook()
     precheck()               # verify binaries in PATH
     ensure_binaries_exist(ScriptFolder)
 

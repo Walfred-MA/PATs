@@ -18,19 +18,21 @@ A typical setup uses conda:
 
 Usage
 -----
-From the root directory of the PAT repository, run:
+From the root directory of the PAT repository, run install.py and reactivate the environment:
+
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
 
     python install/install.py --prefix /path/to/scripts/
+    conda deactivate
+    conda activate patenv
+
 
 The `--prefix` path should match the value of `"ScriptFolder"` in your Snakemake config JSON.  
 For example, if your config contains:
 
     "ScriptFolder": "/home/user/PAT/scripts/"
 
-then run:
-    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
-    python install/install.py --prefix /home/user/PAT/scripts/
 
 What the Script Does
 --------------------

@@ -23,6 +23,16 @@ def _safe_rule_eq(self, other):
 _Rule.__eq__ = _safe_rule_eq
 # --- end patch ---
 
+from snakemake.shell import shell as _original_shell
+
+def patched_shell(cmd, *args, **kwargs):
+    CONDA_PREFIX = os.environ.get("CONDA_PREFIX", "")
+    export_cmd = f'export LD_LIBRARY_PATH="{CONDA_PREFIX}/lib:$LD_LIBRARY_PATH"; '
+    return _original_shell(export_cmd + cmd, *args, **kwargs)
+
+import snakemake.shell
+snakemake.shell.shell = patched_shell
+
 # Load config
 with open("config.json") as f:
     config = json.load(f)
