@@ -255,7 +255,7 @@ rule hotspots:
                 slurm_extra="--mem=125G -c 62"
         threads: 62
         run:
-                shell("cat snaketemp/{input.blocks}.hotspots | xargs -I [] -P {threads} bash -c 'mkdir -p [] ' ")
+                shell("cat {input.blocks}.hotspots | xargs -I [] -P {threads} bash -c 'mkdir -p [] ' ")
                 shell("{params.script}/kmercounter8 -T {input.blocks} -O {input.blocks}.hotspots -I {params.qpath} -n {threads} -c 200 -s 1 -m 1")
                 shell("touch {output.touch}")
             
