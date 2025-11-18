@@ -4,6 +4,10 @@ PATs: Pangenome Allele Typing Snakemake Pipeline
 This pipeline performs pangenome-based allele analysis and k-mer genotyping using 
 partitioned sequence regions from pangenome assemblies and short-read queries.
 
+Snakefile: the main pipeline file used for large number of genes
+Snakefile_light: the alternative lighter pipeline file used for only a few genes
+
+
 📁 Repository Root:
     Place this pipeline script and the `config.json` file at the root.
     Compiled binaries and Python scripts are expected in the folder specified 
