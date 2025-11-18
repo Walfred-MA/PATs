@@ -34,7 +34,8 @@ typedef unsigned char  uint8;
 
 extern bool ifmask;
 
-
+using kmer32_dict_nt = std::unordered_map<ull, uint8>;
+using kmer32_set_nt = std::unordered_map<ull,bool>;
 
 struct hash_128 {
     
@@ -145,8 +146,79 @@ static std::string kmer_int_toatcg(ull kmer)
 }
 
 
+static void write_cache(const char* outputfile, const std::unordered_set<ull>& allkmers)
+{
+    std::ofstream ofs(outputfile, std::ios::binary);
+    if (!ofs) {
+        throw std::runtime_error(std::string("Cannot open file for writing: ") + outputfile);
+    }
+
+    // 1) write number of elements
+    uint64_t n = allkmers.size();
+    ofs.write(reinterpret_cast<const char*>(&n), sizeof(n));
+
+    // 2) write each ull
+    for (ull k : allkmers) {
+        ofs.write(reinterpret_cast<const char*>(&k), sizeof(k));
+    }
+
+    if (!ofs) {
+        throw std::runtime_error(std::string("Error while writing cache file: ") + outputfile);
+    }
+}
 
 
+static void read_cache_to_map(const char* inputfile, kmer32_dict_nt& dict)
+{
+    std::ifstream ifs(inputfile, std::ios::binary);
+    if (!ifs) {
+        throw std::runtime_error(std::string("Cannot open file for reading: ") + inputfile);
+    }
+
+    uint64_t n = 0;
+    ifs.read(reinterpret_cast<char*>(&n), sizeof(n));
+    if (!ifs) {
+        throw std::runtime_error(std::string("Error reading size from cache file: ") + inputfile);
+    }
+
+    dict.clear();
+    dict.reserve(static_cast<size_t>(n * 1.3));  // small slack
+
+    for (uint64_t i = 0; i < n; ++i) {
+        ull k;
+        ifs.read(reinterpret_cast<char*>(&k), sizeof(k));
+        if (!ifs) {
+            throw std::runtime_error(std::string("Error reading element from cache file: ") + inputfile);
+        }
+        dict.emplace(k, 0);   // value initialized as 0
+    }
+}
+
+static void read_cache_to_map(const char* inputfile, kmer32_set_nt& dict)
+{
+    std::ifstream ifs(inputfile, std::ios::binary);
+    if (!ifs) {
+        throw std::runtime_error(std::string("Cannot open file for reading: ") + inputfile);
+    }
+
+    uint64_t n = 0;
+    ifs.read(reinterpret_cast<char*>(&n), sizeof(n));
+    if (!ifs) {
+        throw std::runtime_error(std::string("Error reading size from cache file: ") + inputfile);
+    }
+
+    dict.clear();
+    dict.reserve(static_cast<size_t>(n * 1.3));  // small slack
+
+    for (uint64_t i = 0; i < n; ++i) {
+        ull k;
+        ifs.read(reinterpret_cast<char*>(&k), sizeof(k));
+        if (!ifs) {
+            throw std::runtime_error(std::string("Error reading element from cache file: ") + inputfile);
+        }
+        dict.emplace(k, 0);   // value initialized as 0
+    }
+}
 
 
 #endif /* struct_hpp */

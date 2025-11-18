@@ -240,7 +240,7 @@ ull kmer_counter<dictsize>::read_counttarget(vector<std::string> &targetfiles)
     return totalkmers;
 
 };
-*/
+
 
 
 inline static void write_cache(const char* outputfile, const std::unordered_set<ull>& allkmers)
@@ -290,6 +290,7 @@ inline static void read_cache_to_map(const char* inputfile, kmer32_dict_nt& dict
         dict.emplace(k, 0);   // value initialized as 0
     }
 }
+*/
 
 template <int dictsize>
 void kmer_counter<dictsize>::read_counttarget(std::string &infile)
@@ -567,10 +568,10 @@ void kmer_counter<dictsize>::read_file()
             
             fasta targetfile(targetfiles[j].c_str());
             
-            count_target(targetfile,prefix, target_map_nt);
-            
+            bool iffind = count_target(targetfile,prefix, target_map_nt);
+            if (iffind == 0) target_map_nt.clear();
+
             auto outputfile = outputfiles[j] + prefix;
-            
             write(outputfile.c_str(), kmer_hash, samplevecs, target_map_nt);
             
         }

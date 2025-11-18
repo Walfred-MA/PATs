@@ -25,7 +25,6 @@ import time
 import uuid
 from typing import Dict, List, Tuple
 import os
-import pandas as pd
 
 script_dir = pathlib.Path(__file__).resolve().parent
 # --------------------------------------------------------------------------- #

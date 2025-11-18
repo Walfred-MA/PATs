@@ -168,13 +168,13 @@ def ensure_conda_deps():
 
     needed_specs = []
 
-    # ---- htslib: accept 1.19–1.21; otherwise install 1.21 ----
+    # ---- htslib: require exactly 1.21 ----
     have_hts, hts_ver = conda_has_package("htslib")
     if have_hts and hts_ver is not None:
-        if version_in_range(hts_ver, "1.19", "1.21"):
-            print(f"[CHECK] htslib version OK: {hts_ver} (accepted range 1.19–1.21)")
+        if version_cmp(hts_ver, "1.21") == 0:
+            print(f"[CHECK] htslib version OK: {hts_ver} == 1.21")
         else:
-            print(f"[WARN] htslib {hts_ver} not in [1.19, 1.21]; will install htslib=1.21")
+            print(f"[WARN] htslib {hts_ver} != 1.21; will install htslib=1.21")
             needed_specs.append("htslib=1.21")
     else:
         print("[WARN] htslib not found; will install htslib=1.21")
@@ -209,6 +209,29 @@ def ensure_conda_deps():
         conda_install_packages(needed_specs)
     else:
         print("[CHECK] htslib, eigen, and snakemake satisfy version requirements.")
+
+    # ---- numpy: required ----
+    have_numpy, numpy_ver = conda_has_package("numpy")
+    if have_numpy and numpy_ver is not None:
+        print(f"[CHECK] numpy already installed (version {numpy_ver})")
+    else:
+        print("[WARN] numpy not found; will install numpy")
+        needed_specs.append("numpy")
+
+    # ---- pandas: required ----
+    have_pandas, pandas_ver = conda_has_package("pandas")
+    if have_pandas and pandas_ver is not None:
+        print(f"[CHECK] pandas already installed (version {pandas_ver})")
+    else:
+        print("[WARN] pandas not found; will install pandas")
+        needed_specs.append("pandas")
+
+    if needed_specs:
+        print(f"[INFO] Missing or incompatible packages, will install via conda: {', '.join(needed_specs)}")
+        conda_install_packages(needed_specs)
+    else:
+        print("[CHECK] htslib, eigen, snakemake, numpy, and pandas satisfy requirements.")
+
 
 
 def ensure_conda_bio_tools():

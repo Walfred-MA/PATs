@@ -23,15 +23,14 @@
 #include <mutex>
 
 #include "fasta.hpp"
+#include "fastq.hpp"
 #include "KmerStruct.hpp"
-#include "gzfile.hpp"
 
 using namespace std;
-extern bool singletarget;
-#define nbase 3
-using kmer64_set_nt = std::unordered_map<u128, bool, hash_128> ;
-//using kmer32_set_nt = std::unordered_set<ull>;
 
+
+using kmer64_set_nt = std::unordered_set<u128, hash_128> ;
+using kmer32_set_nt = std::unordered_set<ull>;
 
 template <int dictsize>
 class kmer_filter
@@ -39,29 +38,28 @@ class kmer_filter
     using kmer_int = typename std::conditional<(dictsize>32), u128, ull>::type;
     using kmer_set_type_nt = typename std::conditional<(dictsize>32), kmer64_set_nt, kmer32_set_nt>::type;
     
-    //kmer_set_type_nt target_map_nt;
-    //kmer_set_type_nt exclude_map_nt;
+    kmer_set_type_nt target_map_nt;
+    kmer_set_type_nt exclude_map_nt;
     
     ull totalkmers = 1;
     kmer_int *kmer_records;
     
-    int knum = 0;
+    int klen = 31 , knum = 0;
     bool iftarget = 0;
     vector<pair<ull,ull>> targetranges;
     uint targetindex = 0;
     std::atomic_uint restfileindex ;
     std::mutex Threads_lock;
-    std::mutex Map_lock;
+    std::mutex Map_lock;   
  
     std::vector<std::thread*> threads;
     std::vector<std::string> inputfiles;
     std::vector<std::string> outputfiles;
     std::vector<std::string> prefixes;
-    std::vector<std::string> targetfiles;
 
 public:
     
-    kmer_filter (int kmersize)
+    kmer_filter (int kmersize): klen(31)
     {
         kmer_records = (kmer_int *) malloc(1000);
     };
@@ -70,27 +68,27 @@ public:
         free(kmer_records);
     };
     template <class typefile>
-    void read_counttarget(typefile &fastafile,  kmer_set_type_nt &target_map_nt, kmer_set_type_nt &exclude_map_nt);
+    void read_counttarget(typefile &fastafile);
     
     void read_target();
         
     template <class typefile>
-    void filter_kmer(typefile &fastafile, kmer_set_type_nt &target_map_nt, kmer_set_type_nt &exclude_map_nt);
+    void filter_kmer(typefile &fastafile);
     
-    void read_files(std::vector<std::string>& inputfiles, std::vector<std::string>& outputfiles, std::vector<std::string>& prefixes, std::vector<std::string>& targetfiles,int numthread);
+    void read_files(std::vector<std::string>& inputfiles, std::vector<std::string>& outputfiles, std::vector<std::string>& prefixes ,int numthread);
     
     void read_targets(std::vector<std::string>& inputfiles,int numthread);
     
     void read_file();
             
-    void write(const char* outfile, kmer_set_type_nt &target_map_nt, kmer_set_type_nt &exclude_map_nt);
+    void write(const char* outfile);
 
 };
 
 
 
 template <typename T>
-static void kmer_read_f_(char base, int &current_size, T &current_kmer, T &reverse_kmer)
+static void kmer_read_c_(char base, int klen, int &current_size, T &current_kmer, T &reverse_kmer)
 {
     int converted = 0;
     T reverse_converted;
@@ -109,38 +107,12 @@ static void kmer_read_f_(char base, int &current_size, T &current_kmer, T &rever
         reverse_converted <<= (2*klen-2);
         reverse_kmer += reverse_converted;
         
-        current_size ++;
         
     }
     
     else
     {
-        current_size = 0;
-        current_kmer = 0;
-        reverse_kmer = 0;
-    }
-}
-
-
-template <typename T>
-static void kmer_read_f_64(char base, int &current_size, T &current_kmer, T &reverse_kmer)
-{
-    int converted = 0;
-    T reverse_converted;
-    
-    if (base == '\n' || base == ' ') return;
-    
-    if (base_to_int_64(base, converted))
-    {
-        current_size += nbase;
-        current_kmer <<= 2*nbase;
-        current_kmer += converted;
-        
-    }
-    
-    else
-    {
-        current_size = 0;
+        current_size = -1;
         current_kmer = 0;
         reverse_kmer = 0;
     }
@@ -148,7 +120,7 @@ static void kmer_read_f_64(char base, int &current_size, T &current_kmer, T &rev
 
 template <int dictsize>
 template <class typefile>
-void kmer_filter<dictsize>::read_counttarget(typefile &fastafile, kmer_set_type_nt &target_map_nt, kmer_set_type_nt &exclude_map_nt)
+void kmer_filter<dictsize>::read_counttarget(typefile &fastafile)
 {
         
     int current_size = 0;
@@ -158,7 +130,7 @@ void kmer_filter<dictsize>::read_counttarget(typefile &fastafile, kmer_set_type_
     
     iftarget = 1;
     
-    std::string StrLine(10000,'\0');
+    std::string StrLine;
     
     while (fastafile.nextLine(StrLine))
     {
@@ -179,20 +151,19 @@ void kmer_filter<dictsize>::read_counttarget(typefile &fastafile, kmer_set_type_
             
             if (base == '\n' || base == ' ' || base == '\t') continue;
 
-            kmer_read_f_(base, current_size, current_kmer, reverse_kmer);
+            kmer_read_c_(base, klen, current_size, current_kmer, reverse_kmer);
             
-            if ( current_size < klen || (ifmask && base >= 'a') ) continue;
+            if (++current_size < klen) continue;
                                 
             auto larger_kmer = (current_kmer >= reverse_kmer) ? current_kmer : reverse_kmer;
-           
-            if ( exclude_map_nt.find(larger_kmer) != exclude_map_nt.end() ) continue;
- 
-            //target_map_nt.insert(larger_kmer);
-            target_map_nt.try_emplace(larger_kmer, false);
+            Map_lock.lock();
+            target_map_nt.insert(larger_kmer);
+            Map_lock.unlock();
         }
     }
     
     fastafile.Close();
+    
     
 };
  
@@ -239,7 +210,7 @@ void kmer_filter<dictsize>::read_target()
         
         fasta readsfile(inputfile);
         
-        //read_counttarget(readsfile);
+        read_counttarget(readsfile);
         
     }
     
@@ -251,7 +222,7 @@ void kmer_filter<dictsize>::read_target()
 
 template <int dictsize>
 template <class typefile>
-void kmer_filter<dictsize>::filter_kmer(typefile &fastafile, kmer_set_type_nt &target_map_nt, kmer_set_type_nt &exclude_map_nt)
+void kmer_filter<dictsize>::filter_kmer(typefile &fastafile)
 {
     
     int current_size = 0;
@@ -259,36 +230,43 @@ void kmer_filter<dictsize>::filter_kmer(typefile &fastafile, kmer_set_type_nt &t
     kmer_int current_kmer = 0;
     kmer_int reverse_kmer = 0;
     
-    std::string StrLine (1000000, '\0');
+    //uint64_t ifmasked = 0;
+    //int num_masked = 0 ;
+    std::string StrLine;
     std::string Header;
+    
     while (fastafile.nextLine(StrLine))
     {
-        /*
         switch (StrLine[0])
         {
             case '@':  case '+': case '>':
                 current_size = 0;
-                break;
+                continue;
             case ' ': case '\n': case '\t':
-                break;
+                continue;
             default:
                 break;
         }
-        */
-        current_size = 0;
+        
         for (auto base: StrLine)
         {
             if (base == '\0') break;
                         
             if (base == '\n' || base == ' ' || base == '\t') continue;
  
-            kmer_read_f_64(base, current_size, current_kmer, reverse_kmer);
+            kmer_read_c_(base, klen, current_size, current_kmer, reverse_kmer);
             
-            if (current_size < klen) continue;
-            //auto larger_kmer = (current_kmer >= reverse_kmer) ? current_kmer:reverse_kmer;
-            //auto larger_kmer  = current_kmer;
-            target_map_nt[current_kmer] = 1;
+            if (++current_size < klen) continue;
+            
+            auto larger_kmer = (current_kmer >= reverse_kmer) ? current_kmer:reverse_kmer;
 
+            Map_lock.lock();
+            if ( target_map_nt.find(larger_kmer) != target_map_nt.end() )
+            {
+                    target_map_nt.erase(larger_kmer);
+                    exclude_map_nt.insert(larger_kmer);
+            }
+            Map_lock.unlock();
         }
     }
         
@@ -296,12 +274,11 @@ void kmer_filter<dictsize>::filter_kmer(typefile &fastafile, kmer_set_type_nt &t
 };
 
 template <int dictsize>
-void kmer_filter<dictsize>::read_files(std::vector<std::string>& inputs, std::vector<std::string>& outputs, std::vector<std::string>& prefs, std::vector<std::string>& targets, int nthreads)
+void kmer_filter<dictsize>::read_files(std::vector<std::string>& inputs, std::vector<std::string>& outputs, std::vector<std::string>& prefs, int nthreads)
 {
     
     inputfiles = inputs;
     outputfiles = outputs;
-    targetfiles = targets;
     prefixes = prefs;
     restfileindex = 0;
     
@@ -318,15 +295,16 @@ void kmer_filter<dictsize>::read_files(std::vector<std::string>& inputs, std::ve
     {
         threads[i]->join();
     }
-        
+    
+    write(outputs[0].c_str());
+    
 }
 
 
 template <int dictsize>
 void kmer_filter<dictsize>::read_file()
 {
-    
-    while (restfileindex < targetfiles.size())
+    while (restfileindex < inputfiles.size())
     {
         
         Threads_lock.lock();
@@ -335,47 +313,13 @@ void kmer_filter<dictsize>::read_file()
         
         Threads_lock.unlock();
         
-        if (inputindex >= targetfiles.size()) break;
-    
-        std::string targetfile = targetfiles[inputindex];
-        std::string outputfolder = outputfiles[inputindex];
-       
-        cout << "merging results on: "<< targetfile << endl;
- 
-        kmer_set_type_nt target_map_nt;
-        kmer_set_type_nt exclude_map_nt;
-                
-        string cachefile = targetfile + "_allkmer.cache";
-        if (FILE *f = fopen(cachefile.c_str(), "r"))
-        {
-            fclose(f);
-            read_cache_to_map(cachefile.c_str(), target_map_nt);
-            std::remove(cachefile.c_str());
-        }
-        else if (targetfile.size())
-        {
-            fasta targetfile_(targetfile.c_str());
-            read_counttarget(targetfile_, target_map_nt, exclude_map_nt);
-        }
+        if (inputindex >= inputfiles.size()) break;
+                        
+        const char* inputfile = inputfiles[inputindex ].c_str();
         
-        for (std::string &prefix: prefixes)
-        {
-            auto outputfile_ = outputfolder + prefix;
-            gzfile outputfile(outputfile_.c_str());
-            filter_kmer(outputfile, target_map_nt, exclude_map_nt);
-        }
+        fasta readsfile(inputfile);
         
-        if (outputfiles.size() == 1 && singletarget)
-        {
-            targetfile = outputfiles[0];
-        }
-        else
-        {
-            targetfile = targetfile + "_kmers.txt";
-        }
-        
-    
-        write(targetfile.c_str(), target_map_nt, exclude_map_nt);
+        filter_kmer(readsfile);
         
     }
         
@@ -385,7 +329,7 @@ void kmer_filter<dictsize>::read_file()
 
 
 template <int dictsize>
-void kmer_filter<dictsize>::write(const char * outputfile, kmer_set_type_nt &target_map_nt, kmer_set_type_nt &exclude_map_nt)
+void kmer_filter<dictsize>::write(const char * outputfile)
 {
     
     FILE *fwrite=fopen(outputfile, "w");
@@ -404,14 +348,9 @@ void kmer_filter<dictsize>::write(const char * outputfile, kmer_set_type_nt &tar
     
     char kmer_seq[digit+1];
     kmer_seq[digit] = '\0';
-    
- 
-    for (auto [seq0, iffilter]: target_map_nt)
+   
+    for (auto seq: target_map_nt)
     {
-        //if ( exclude_map_nt.find(seq) != exclude_map_nt.end() ) continue;
-        ull seq = seq0;
-        
-        if (iffilter) continue;
         for (int index = digit-1; index >= 0 ; --index)
         {
             kmer_seq[index] = "ACGT"[seq%4];
@@ -422,10 +361,8 @@ void kmer_filter<dictsize>::write(const char * outputfile, kmer_set_type_nt &tar
     }
     
     fclose(fwrite);
-
-    /*
+    
     string excludefile = string(outputfile)+"_exclude.txt";
-
     FILE *fwrite2=fopen(excludefile.c_str(), "w");
     
     if (fwrite2==NULL)
@@ -447,11 +384,9 @@ void kmer_filter<dictsize>::write(const char * outputfile, kmer_set_type_nt &tar
     }
 
     fclose(fwrite2);
-    */
+    
     
     return ;
 }
 
 #endif /* KmerFilter_hpp */
-
-

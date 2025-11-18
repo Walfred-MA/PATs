@@ -11,6 +11,18 @@ import shutil
 import sys
 import shutil as _shutil
 
+# --- PATCH Snakemake bug: Rule.__eq__ vs strings ---
+# --- PATCH Snakemake bug: Rule.__eq__ vs strings ---
+from snakemake.rules import Rule as _Rule
+
+def _safe_rule_eq(self, other):
+        if not isinstance(other, _Rule):
+                return False
+        return self.name == other.name and self.output == other.output
+
+_Rule.__eq__ = _safe_rule_eq
+# --- end patch ---
+
 # Load config
 with open("config.json") as f:
     config = json.load(f)

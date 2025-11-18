@@ -1,0 +1,10 @@
+HG38_h1	/project/mchaisso_100/cmb-16/walfred/database/hg38_full.fa_wmask.fa
+CHM13_h1	/project/mchaisso_100/cmb-16/walfred/database/GCF_009914755.1_T2T-CHM13v2.0_genomic.fa_wmask.fa
+apr001_h1	/project/mchaisso_100/datasets/assemblies/Arabian/apr001.1.polished.fa
+apr001_h2	/project/mchaisso_100/datasets/assemblies/Arabian/apr001.2.polished.fa
+apr002_h1	/project/mchaisso_100/datasets/assemblies/Arabian/apr002.1.polished.fa
+apr002_h2	/project/mchaisso_100/datasets/assemblies/Arabian/apr002.2.polished.fa
+apr003_h1	/project/mchaisso_100/datasets/assemblies/Arabian/apr003.1.polished.fa
+apr003_h2	/project/mchaisso_100/datasets/assemblies/Arabian/apr003.2.polished.fa
+apr004_h1	/project/mchaisso_100/datasets/assemblies/Arabian/apr004.1.polished.fa
+apr004_h2	/project/mchaisso_100/datasets/assemblies/Arabian/apr004.2.polished.fa

@@ -1,0 +1,96 @@
+//
+//  Created by Walfred (Wangfei) MA at the University of Southern California,
+//  Mark Chaisson Lab on 2/13/23.
+//
+//  Licensed under the MIT License.
+//  If you use this code, please cite our work.
+//
+
+#ifndef FileReader_hpp
+#define FileReader_hpp
+
+#include <stdio.h>
+#include <string>
+#include <vector>
+#include <fstream>
+#include <iostream>
+#include <utility>
+#include <cstring>
+
+#include "config.hpp"
+
+
+using namespace std;
+
+class FileReader
+{
+    
+public:
+    
+    const char *filepath;
+    int num_seq = 0;
+    
+    std::vector<spair> seqs;
+    
+    FileReader(const char* inputfile, int index = -1):filepath(inputfile) {};
+    
+    bool nextLine(std::string &StrLine);
+    
+    void Load();
+    
+    void Close();
+    
+    void Reset();
+    
+    int GetLine(FILE* fptr, std::string &line)
+    {
+        char buf[1024];
+        line = "";
+        
+        while (true)
+        {
+            if (fgets(buf, sizeof(buf)-1, fptr) == nullptr)
+            {
+                // fgets failed, check if it's an error or end-of-file
+                if (feof(fptr))
+                {
+                    // End-of-file reached
+                    break;
+                }
+                else
+                {
+                    // I/O error occurred
+                    perror("Error reading from file");
+                    return -1;
+                }
+            }
+            
+            line += buf;
+            
+            if (line.back() == '\n')
+            {
+                // Remove the newline character from the end of the line
+                line.pop_back();
+                break;
+            }
+            
+            // If there are no more characters in the file, break the loop
+            if (feof(fptr))
+            {
+                break;
+            }
+        }
+        
+        // Return 1 if the file has more lines, 0 if it's the last line, -1 if an error occurred
+        return !feof(fptr);
+    }
+    
+private:
+
+    std::fstream fafile;
+    
+};
+
+
+#endif /* FileReader_hpp */
+

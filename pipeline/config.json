@@ -1,9 +1,9 @@
 {
   "slurm": " --account=mchaisso_100 --time 50:00:00 --partition=qcb ",
-  "QueryPath": "query_pathes.txt_withref.txt",
+  "QueryPath": "query_pathes.txt_example.txt",
   "ScriptFolder": "../scripts/",
   "TargetFolder": "groups",
-  "genelist": "./Loci.bed",
+  "genelist": "./SMNexample",
   "ReferencePrefix": "NC_0609",
   "NumPartitions": 1
 }
