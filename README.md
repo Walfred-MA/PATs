@@ -81,6 +81,7 @@ Notes:
     - hg38 : chr... (e.g., chr1)
 
 Make sure these prefixes match your FASTA headers.
+Example file can be seen in pipeline/query_pathes.txt_example.txt. 
 
 C. Repeat-mask all references and assemblies
 --------------------------------------------
@@ -116,11 +117,14 @@ Example:
 ```
 chr5_GL339449v2_alt 456848 485731 SMN2 Target=456848-457609,457774-458352
 ```
+Example output format can be seen in pipeline/SMNexample.bed. 
 
 E. Run the Snakemake workflow
 -----------------------------
 See `pipeline/` for workflow logic, C++ utilities, and instructions.
 Compile all C++ tools as directed in that folder’s README.
+
+There are two snakemake files included, Snakefile and Snakefile_light. Snakefile is used for a large number of genes, while Snakefile_light is a lighter version that only works for a small number of genes and requires fewer resources. 
 
 Run example:
 ```
@@ -148,11 +152,11 @@ Example JSON:
 Descriptions:
 ```
 - slurm:         SLURM job submission args
-- QueryPath:     TSV of assemblies/references
+- QueryPath:     TSV of assemblies/references, example file "query_pathes.txt_example.txt", included.
 - ScriptFolder:  Path to scripts folder
 - TargetFolder:  Output folder for results
 - TempFolder:    Temp file directory, default: ./snaketemp/
-- genelist:      BED file for genes (4- or 5-col)
+- genelist:      BED file for genes (4- or 5-col), example file "SMNexample.bed", included.
 - blocksize:     the max sequence length used for pangenome alleles, larger will be splitted, default: 80,000, 
 - ReferencePrefix: Prefix used in reference contigs (e.g., "NC_0609" or "chr")
 - NumPartitions: Number of partitions to divide genes (aim ~1000 genes/partition)
