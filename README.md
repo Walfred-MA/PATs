@@ -208,8 +208,250 @@ This creates:
 - All_matrix.txt.index   → index file
 ```
 
+Matrix format v2.0.1
+--------------------
 
-Note: You might need a background kmer file, which can be obtained from Ctyper's GitHub site, and you may name it as $matrixfilename.bgd for your convenient
+`matrixcompile.py` writes fixed-width k-mer metadata. A k-mer row has six
+tab-separated fields:
+
+```
+row marker | tag(3) | path+strand(3) + qindex(3) | size(4) + qpos(4) + rpos(4) | k-mer(11) | allele indexes
+```
+
+The three-character path field stores `(path_index << 1) | strand`, where
+strand is `0` for `+` and `1` for `-`. The k-mer begins at byte offset 27 and
+the allele-index field begins at byte offset 39. Internal `|` separators are
+not used. All numeric fields use the existing 64-character integer encoding.
+
+Limits are path index `0..32767`, query index `0..262143`, and
+size/query-position/reference-position `0..16777215`. Compilation stops with
+an error if a value is outside its field range; paths are never combined into
+a virtual overflow path.
+
+`matrixindex.py` writes this as the first index line:
+
+```
+@v2.0.1,support:v1.2.0
+```
+
+Note: You might need a background kmer file, which can be obtained from Ctyper's GitHub site, and you may name it as All_matrix.txt.bgd for your convenient
+
+G. Profile with Ctyper for fast target genotyping
+-------------------------------------------------
+
+PATs builds the matrix database. Ctyper profiling is a separate, usually
+one-time step that examines aligned reads to locate the reference intervals
+from which informative or mismapped target reads originate. The resulting BED
+file can then be supplied with `-B` so later Ctyper runs read only those regions
+instead of scanning every aligned read.
+
+This workflow is intended for indexed BAM or CRAM files. It has two phases:
+
+1. Profile one or more representative aligned samples to make a target BED.
+2. Reuse that BED with `-B` for fast genotyping of other samples.
+
+### Required files and reference matching
+
+Keep the PATs matrix and its index together:
+
+```
+CYP2D.matrix.txt
+CYP2D.matrix.txt.index
+```
+
+The Ctyper binary must include support for PATs matrix encoding v2.0.1. BAM
+files should have a `.bai` index and CRAM files should have a `.crai` index.
+When reading CRAM, provide the exact decoding reference with `-T` unless
+`REF_CACHE` and `REF_PATH` have already been configured.
+
+The profiling BED is tied to the reference coordinate system used by the
+aligned reads, not necessarily the reference used by PATs to construct the
+matrix. For example, reads aligned to hg38 require an hg38 profiling BED, even
+if the PATs matrix was anchored on CHM13. Do not reuse an hg38 profiling BED
+for CHM13-aligned reads, or the reverse.
+
+Record the alignment-reference MD5 in the BED filename:
+
+```
+md5sum aligned_reference.fa
+```
+
+For example:
+
+```
+TargetRegions.<reference_md5>.bed
+```
+
+### Profile one representative sample
+
+Run profiling without `-B`. Ctyper must scan the aligned file to discover all
+useful source intervals:
+
+```
+ctyper \
+  -m CYP2D.matrix.txt \
+  -p representative.cram \
+  -o TargetRegions.<reference_md5>.bed \
+  -T aligned_reference.fa \
+  -d 1 \
+  -N 4 \
+  2> CYP2D.profile.log
+```
+
+In the current Ctyper 1.2.0 command-line implementation, `-d 1` is needed to
+satisfy coverage-input validation during profiling. Profiling does not use
+that placeholder value for genotyping.
+
+For a CYP2D-only PATs matrix, no `-g` option is necessary because every matrix
+group is already a CYP2D target. For a database containing many gene families,
+add a quoted prefix or an exact gene/matrix name, for example:
+
+```
+-g 'CYP2D*'
+-g CYP2D6
+-g '#CYP2Dgroup1'
+```
+
+Use the exact names present in `CYP2D.matrix.txt.index`. A trailing `*` selects
+a prefix and should be quoted so the shell does not expand it.
+
+### Profile several samples
+
+Several representative samples can find mapping locations that are absent
+from one individual. Make one input list and one output list, with one path per
+line and the same number and order of lines:
+
+```
+# profile.inputs.txt
+sample1.cram
+sample2.cram
+sample3.cram
+```
+
+```
+# profile.outputs.txt
+profiles/sample1.bed
+profiles/sample2.bed
+profiles/sample3.bed
+```
+
+Then run:
+
+```
+ctyper \
+  -m CYP2D.matrix.txt \
+  -P profile.inputs.txt \
+  -O profile.outputs.txt \
+  -o TargetRegions.<reference_md5>.bed \
+  -T aligned_reference.fa \
+  -d 1 \
+  -n 3 \
+  -N 2 \
+  2> CYP2D.profile.log
+```
+
+Keep `-P` before `-O` and keep the merged-summary `-o` after `-O`. The `-O`
+paths receive the per-sample profiling BEDs and `-o` receives the merged BED.
+Use a new summary pathname rather than mixing regions from an unrelated
+reference or an older profiling experiment.
+
+### Fast genotyping of one sample
+
+After profiling, reuse the BED with `-B`:
+
+```
+ctyper \
+  -m CYP2D.matrix.txt \
+  -i new_sample.cram \
+  -o new_sample.CYP2D.ctyper.txt \
+  -B TargetRegions.<reference_md5>.bed \
+  -T aligned_reference.fa \
+  -d 24 \
+  -N 4 \
+  2> new_sample.CYP2D.log
+```
+
+The example `-d 24` is the expected 31-mer depth for approximately 30x
+coverage with 150-bp reads:
+
+```
+31-mer depth = (1 - 30/read_length) * sequencing depth
+```
+
+Replace 24 with the appropriate value for the sample. Do not use `-d` together
+with `-b`. If `CYP2D.matrix.txt.bgd` exists, Ctyper uses it automatically and
+`-d` can be omitted. A depth file can instead be provided with `-D` for a
+cohort.
+
+Ctyper appends normal genotyping output when an `-o` path already exists. Use
+a new output pathname for each run unless appending is intentional.
+
+### Fast genotyping of a cohort
+
+Create matching files with one input path and one output path per line:
+
+```
+# cohort.inputs.txt
+sampleA.cram
+sampleB.cram
+sampleC.cram
+```
+
+```
+# cohort.outputs.txt
+results/sampleA.ctyper.txt
+results/sampleB.ctyper.txt
+results/sampleC.ctyper.txt
+```
+
+For samples with individual depth estimates, also create `cohort.depths.txt`
+with one 31-mer depth value per line in input order. Then run:
+
+```
+ctyper \
+  -m CYP2D.matrix.txt \
+  -I cohort.inputs.txt \
+  -O cohort.outputs.txt \
+  -D cohort.depths.txt \
+  -B TargetRegions.<reference_md5>.bed \
+  -T aligned_reference.fa \
+  -n 8 \
+  -N 2 \
+  2> CYP2D.cohort.log
+```
+
+Here `-n` is the number of samples processed in parallel and `-N` is the
+number of threads used within each sample. Approximate simultaneous CPU use is
+`-n` times `-N`, so select both values to fit the cluster allocation.
+Parallelizing across samples is usually the most efficient choice for a
+cohort; 1-4 threads per sample is a practical starting point when storage I/O
+is limiting.
+
+For a multi-family matrix, restrict both profiling and genotyping consistently
+with `-g 'CYP2D*'` or a matching `-G` gene-list file. When `-g`/`-G` and `-B`
+are used together, Ctyper uses only BED records whose names match the selected
+targets.
+
+### If no profiling BED is available
+
+Ctyper can use matrix reference intervals as a fallback for a selected target:
+
+```
+ctyper \
+  -m multi_family.matrix.txt \
+  -i sample.cram \
+  -o sample.CYP2D.ctyper.txt \
+  -g 'CYP2D*' \
+  -r gene \
+  -T aligned_reference.fa \
+  -d 24 \
+  -N 4 \
+  2> sample.CYP2D.log
+```
+
+This fallback can miss useful reads that map outside the expected locus and is
+less robust to mismapping and reference bias. A BED learned by profiling
+representative aligned samples is preferred for repeated fast target runs.
 
 4) Tips & Gotchas
 ------------------
@@ -226,3 +468,4 @@ Questions / Issues
 - See `masking/` and `snakemake/` READMEs
 - For BED help: python tools/gff_toGeneBed.py -h
 - If problems arise, double-check FASTA paths and index files.
+
