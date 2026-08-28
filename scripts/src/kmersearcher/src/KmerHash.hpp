@@ -94,4 +94,3 @@ public:
 
 
 #endif /* KmerHash_hpp */
-

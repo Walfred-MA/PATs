@@ -1,0 +1,8 @@
+bitarray>=2.8
+Cython>=3.0
+numpy>=1.24
+scipy>=1.10
+snakemake==6.5.0
+# Snakemake 6.5.0 calls the legacy pulp.list_solvers() API, which was
+# removed in PuLP 2.8. Keep this exact pin unless Snakemake is upgraded.
+PuLP==2.7.0

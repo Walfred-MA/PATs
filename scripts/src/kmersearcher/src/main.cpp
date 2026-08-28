@@ -28,7 +28,7 @@ extern bool ifmask;
 bool iffindnew = 0;
 
 template <int dictsize>
-void run(std::vector<std::string> &inputfiles, std::vector<std::string>& targetfiles, std::vector<std::string> &outputfiles, std::vector<std::string> &prefixes, const int kmer_size, const int nthreads, const int mode, const int cutoff)
+void run(std::vector<std::string> &inputfiles, std::vector<std::string>& targetfiles, std::vector<std::string> &outputfiles, std::vector<std::string> &prefixes, const int kmer_size, const int nthreads, const int sample_nthreads, const int mode, const int cutoff, const int kwindowsize)
 {
     /*
     if (mode == 3)
@@ -78,14 +78,15 @@ void run(std::vector<std::string> &inputfiles, std::vector<std::string>& targetf
 
     if (mode == 1)
     {
-        kmer_map<dictsize> map(kmer_size, cutoff);
+        kmer_map<dictsize> map(kmer_size, cutoff, kwindowsize);
         
         if (targetfiles.size())
         {
-            map.read_target(targetfiles);
+            map.read_target(targetfiles, nthreads);
         }
         
-        map.read_files(inputfiles, outputfiles, prefixes, nthreads);
+        map.read_files(inputfiles, outputfiles, prefixes, nthreads,
+                       sample_nthreads);
         
     }
     
@@ -123,7 +124,8 @@ int main(int argc, const char * argv[]) {
 
     const char* Argument="";
         
-    int mode = 1, kmer_size = 31,  nthreads = 1, cutoff =50;
+    int mode = 1, kmer_size = 31, nthreads = 1, sample_nthreads = 1,
+        cutoff = 50, kwindowsize = 1000;
     
     for (int i = 1; i < argc ; i++)
     {
@@ -293,19 +295,26 @@ int main(int argc, const char * argv[]) {
             kmer_size=(int)atoi(argv[i]);
         }
         
-        else if (strcmp(Argument, "-u")==0 or strcmp(Argument, "--unknown")==0)
-        {
-            mode = 5;
-        }
-        
         else if (strcmp(Argument, "-n")==0 or strcmp(Argument, "--nthreads")==0)
         {
             nthreads=(int)atoi(argv[i]);
+        }
+
+        else if (strcmp(Argument, "-N")==0 or
+                 strcmp(Argument, "--sample-nthreads")==0 or
+                 strcmp(Argument, "--sample-threads")==0)
+        {
+            sample_nthreads=(int)atoi(argv[i]);
         }
         
         else if (strcmp(Argument, "-c")==0 or strcmp(Argument, "--cutoff")==0)
         {
             cutoff=(int)atoi(argv[i]);
+        }
+
+        else if (strcmp(Argument, "-w")==0 or strcmp(Argument, "--kwindowsize")==0)
+        {
+            kwindowsize=(int)atoi(argv[i]);
         }
 
         else if (strcmp(Argument, "-m")==0 or strcmp(Argument, "--mask")==0)
@@ -321,9 +330,53 @@ int main(int argc, const char * argv[]) {
     }
     
     if (!inputfiles.size()) return 1;
-    
-    run<32>(inputfiles, targetfiles, outputfiles, prefixes,kmer_size, nthreads,mode,cutoff);
+    if (cutoff <= 0)
+    {
+        std::cerr << "ERROR: --cutoff must be greater than zero" << std::endl;
+        return 1;
+    }
+    if (kwindowsize <= 0)
+    {
+        std::cerr << "ERROR: --kwindowsize must be greater than zero" << std::endl;
+        return 1;
+    }
+    if (nthreads <= 0)
+    {
+        std::cerr << "ERROR: --nthreads must be greater than zero" << std::endl;
+        return 1;
+    }
+
+    if (sample_nthreads <= 0)
+    {
+        std::cerr << "ERROR: -N/--sample-nthreads must be greater than zero"
+                  << std::endl;
+        return 1;
+    }
+
+    if (sample_nthreads > 1)
+    {
+        for (const std::string &inputfile: inputfiles)
+        {
+            const std::string fai = inputfile + ".fai";
+            if (!std::filesystem::is_regular_file(fai))
+            {
+                std::cerr << "ERROR: -N requires a FASTA index: " << fai
+                          << std::endl;
+                return 1;
+            }
+        }
+    }
+
+    try
+    {
+        run<32>(inputfiles, targetfiles, outputfiles, prefixes, kmer_size,
+                nthreads, sample_nthreads, mode, cutoff, kwindowsize);
+    }
+    catch (const std::exception &error)
+    {
+        std::cerr << "ERROR: " << error.what() << std::endl;
+        return 1;
+    }
     
     return 0;
 }
-

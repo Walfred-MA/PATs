@@ -9,6 +9,8 @@
 #ifndef KmerCounter_hpp
 #define KmerCounter_hpp
 
+#define MAX_GROUP_FILES 99
+
 #include <stdio.h>
 #include <string>
 #include <vector>
@@ -57,6 +59,8 @@ class kmer_counter
     kmer32_dict kmer_hash, masked_hash;
     
     vector<vector<bool>> norms, masknorms;
+    vector<std::string> sample_names;
+    vector<std::string> kmer_texts, masked_kmer_texts;
     
     ull totalkmers = 1, totalmasked = 1;
     ull totalsamples = 0;
@@ -77,8 +81,10 @@ public:
     void determinegroup(vector<uint> &groups, vector<std::atomic<uint16_t>> & thenorm);
     
     void write(string &inputfile, string &outputfile, vector<uint> & groups, vector<vector<bool>> &norms);
+    void write_target_partition(string &inputfile, string &outputfile, const std::unordered_set<std::string> &target_names);
     
     void getnorm(string &inputfile, string &kmerfile, string &outputfile);
+    void gettargetpartition(string &inputfile, string &kmerfile, string &outputfile, const std::unordered_set<std::string> &target_names);
 };
 
 inline static void update_counter(kmer32_dict &target_map, ull &larger_kmer, uint8* samplevecs)
@@ -124,6 +130,28 @@ static void kmer_read_c(char base, int &current_size, T &current_kmer, T &revers
     }
 }
 
+inline static std::string counter_sequence_name_from_header(const std::string &header)
+{
+    std::string body = header;
+    if (!body.empty() && body[0] == '>') body = body.substr(1);
+    
+    if (ifbed)
+    {
+        std::vector<std::string> fields = split_text_fields(body);
+        if (fields.size() >= 4) return fields[3];
+        if (!fields.empty()) return fields[0];
+        return "";
+    }
+    
+    size_t tab = body.find('\t');
+    if (tab != std::string::npos) body = body.substr(0, tab);
+    
+    std::vector<std::string> fields = split_text_fields(body);
+    if (!fields.empty()) return fields[0];
+    
+    return body;
+}
+
 
 template <int dictsize>
 template <class typefile>
@@ -134,6 +162,7 @@ void kmer_counter<dictsize>::read_target(typefile &fastafile)
     
     ull current_kmer = 0;
     ull reverse_kmer = 0;
+    std::string current_text_kmer;
 
     std::string StrLine;
     
@@ -141,12 +170,14 @@ void kmer_counter<dictsize>::read_target(typefile &fastafile)
     
     kmer32_dict* usehash = &kmer_hash;
     ull* usecounter = &totalkmers;
+    vector<std::string>* usetexts = &kmer_texts;
     while (fastafile.nextLine(StrLine))
     {
         switch (StrLine[0])
         {
             case '>': case '+':
                 current_size = 0;
+                current_text_kmer.clear();
                 continue;
             case ' ': case '\n': case '\t':
                 continue;
@@ -160,19 +191,32 @@ void kmer_counter<dictsize>::read_target(typefile &fastafile)
             
             if (base == '\n' || base == ' ') continue;
 
+            int converted = 0;
+            if (base_to_int(base, converted))
+            {
+                current_text_kmer.push_back(base);
+                if (current_text_kmer.size() > klen) current_text_kmer.erase(0, current_text_kmer.size() - klen);
+            }
+            else
+            {
+                current_text_kmer.clear();
+            }
+
             kmer_read_c(base, current_size, current_kmer, reverse_kmer);
            
             if (current_size < klen ) continue;
                                
-            if (! (ifmask && base >= 'a'))
+            if ( ! ( ifmask && base >= 'a'))
             {
                 usehash = &kmer_hash;
                 usecounter = &totalkmers;
+                usetexts = &kmer_texts;
             }
             else
             {
                 usehash = &masked_hash;
                 usecounter = &totalmasked;
+                usetexts = &masked_kmer_texts;
             }
 
             auto larger_kmer = (current_kmer >= reverse_kmer) ? current_kmer : reverse_kmer;
@@ -181,7 +225,10 @@ void kmer_counter<dictsize>::read_target(typefile &fastafile)
             
             if (find == usehash->end())
             {
-                (*usehash)[larger_kmer] = (*usecounter)++;
+                uint index = static_cast<uint>((*usecounter)++);
+                (*usehash)[larger_kmer] = index;
+                if (usetexts->size() <= index) usetexts->resize(index + 1);
+                (*usetexts)[index] = current_text_kmer;
             }
             
         }
@@ -203,11 +250,13 @@ void kmer_counter<dictsize>::read_file(typefile &fastafile)
     ull reverse_kmer = 0;
     std::string StrLine;
     totalsamples = 0;
+    sample_names.clear();
     while (fastafile.nextLine(StrLine))
     {
         switch (StrLine[0])
         {
             case '>':
+                sample_names.push_back(counter_sequence_name_from_header(StrLine));
                 totalsamples++;
                 continue;
             case ' ': case '\n': case '\t':
@@ -285,8 +334,12 @@ void kmer_counter<dictsize>::read_file(typefile &fastafile)
 
 inline static void capped_atomic_increment(std::atomic<uint16_t>& atom) {
     uint16_t old = atom.load(std::memory_order_relaxed);
-    if (old < MAX_UINT16)
-        atom.compare_exchange_weak(old, old + 1, std::memory_order_relaxed);
+    while (old < MAX_UINT16 &&
+           !atom.compare_exchange_weak(old, old + 1, std::memory_order_relaxed))
+    {
+        // compare_exchange_weak refreshes `old` with the current value on
+        // failure; retry until the increment lands or the cap is reached.
+    }
 }
 
 inline static void offsite_operation(std::atomic<ull> &offsite, const vector<bool> norm, vector<std::atomic<int>>& vec_offsite, vector<std::atomic<uint16_t>>&normmatrix, size_t colsize)
@@ -465,7 +518,21 @@ void kmer_counter<dictsize>::getnorm(string &inputfile, string &kmerfile, string
     
 }
 
+template <int dictsize>
+void kmer_counter<dictsize>::gettargetpartition(string &inputfile, string &kmerfile, string &outputfile, const std::unordered_set<std::string> &target_names)
+{
+    fasta targetfile(kmerfile.c_str());
+    
+    read_target(targetfile);
+    
+    fasta readsfile(inputfile.c_str());
+    
+    read_file(readsfile);
+    
+    write_target_partition(inputfile, outputfile, target_names);
+}
 
+/*
 inline static uint compute_group_order(const vector<uint>& groups, vector<uint>& groupsort)
 {
     size_t N = groups.size();
@@ -499,142 +566,392 @@ inline static uint compute_group_order(const vector<uint>& groups, vector<uint>&
     
     return unique_gids.size() + 1;
 }
+*/
+
+#define MAX_OPEN_GROUP_FILES_PER_PASS 1000
+
+inline static uint compute_group_order(const vector<uint>& groups, vector<uint>& groupsort)
+{
+    size_t N = groups.size();
+    vector<uint> counts(N + 1, 0);
+
+    for (uint g : groups)
+    {
+        counts[g]++;
+    }
+
+    vector<uint> unique_gids;
+    unique_gids.reserve(N + 1);
+    for (uint g = 0; g <= N; ++g)
+    {
+        if (counts[g] > 0)
+            unique_gids.push_back(g);
+    }
+
+    sort(unique_gids.begin(), unique_gids.end(), [&](uint a, uint b) {
+        return counts[a] > counts[b];
+    });
+
+    groupsort.assign(N + 1, 0); // 0 = filtered
+    for (size_t i = 0; i < unique_gids.size(); ++i)
+    {
+        groupsort[unique_gids[i]] = static_cast<uint>(i + 1);
+    }
+
+    return static_cast<uint>(unique_gids.size() + 1); // +1 for filtered bucket 0
+}
+
+inline static void update_target_partition_counts(
+    const vector<vector<bool>> &source_norms,
+    const vector<bool> &is_target_sample,
+    vector<bool> &keep_kmer,
+    vector<int> &sample_counts)
+{
+    keep_kmer.assign(source_norms.size(), false);
+    
+    for (size_t kmer_index = 0; kmer_index < source_norms.size(); ++kmer_index)
+    {
+        const vector<bool> &currnorm = source_norms[kmer_index];
+        bool in_target = false;
+        
+        for (size_t sample_index = 0; sample_index < currnorm.size() && sample_index < is_target_sample.size(); ++sample_index)
+        {
+            if (is_target_sample[sample_index] && currnorm[sample_index])
+            {
+                in_target = true;
+                break;
+            }
+        }
+        
+        if (!in_target) continue;
+        
+        keep_kmer[kmer_index] = true;
+        for (size_t sample_index = 0; sample_index < currnorm.size() && sample_index < sample_counts.size(); ++sample_index)
+        {
+            if (currnorm[sample_index]) sample_counts[sample_index]++;
+        }
+    }
+}
+
+inline static void prune_target_partition_kmers(
+    const vector<vector<bool>> &source_norms,
+    const vector<bool> &selected_samples,
+    vector<bool> &keep_kmer)
+{
+    for (size_t kmer_index = 0; kmer_index < source_norms.size() && kmer_index < keep_kmer.size(); ++kmer_index)
+    {
+        if (!keep_kmer[kmer_index]) continue;
+        
+        const vector<bool> &currnorm = source_norms[kmer_index];
+        bool in_selected = false;
+        
+        for (size_t sample_index = 0; sample_index < currnorm.size() && sample_index < selected_samples.size(); ++sample_index)
+        {
+            if (selected_samples[sample_index] && currnorm[sample_index])
+            {
+                in_selected = true;
+                break;
+            }
+        }
+        
+        keep_kmer[kmer_index] = in_selected;
+    }
+}
 
 template <int dictsize>
-void kmer_counter<dictsize>::write(string &inputfile, string &outputfile, vector<uint> & groups, vector<vector<bool>> &norms)
+void kmer_counter<dictsize>::write_target_partition(string &inputfile, string &outputfile, const std::unordered_set<std::string> &target_names)
 {
-    vector<uint> groupsort;
-    uint counter = compute_group_order(groups, groupsort);
+    vector<bool> is_target_sample(totalsamples, false);
+    size_t matched_targets = 0;
     
-    std::vector<bool> ifopen(counter, 0) ;
-    std::vector<string> filenames(counter, "") ;
-    std::vector<std::ofstream> kmerfiles(counter);
-    kmerfiles[0].open(outputfile + "_filtered.fa_kmer.list");
-    ifopen[0] = 1;
-    
-    for (int i = 1; i < counter; ++i)
+    for (size_t i = 0; i < sample_names.size() && i < is_target_sample.size(); ++i)
     {
-        filenames[i] = outputfile + "p" + std::to_string(i)+".fa_kmer.list";
+        if (target_names.find(sample_names[i]) != target_names.end())
+        {
+            is_target_sample[i] = true;
+            matched_targets++;
+        }
     }
     
-    for (const auto& pair : kmer_hash)
+    if (matched_targets == 0)
     {
-        vector<bool> & currnorm = norms[pair.second];
-        uint groupindex = 0;
-        for (int i = 0 ; i < groups.size(); ++i)
+        std::cerr << "WARNING: No -t/--targets names matched input sequence names.\n";
+    }
+    
+    vector<int> sample_counts(totalsamples, 0);
+    vector<bool> keep_kmer, keep_masked_kmer;
+    
+    update_target_partition_counts(norms, is_target_sample, keep_kmer, sample_counts);
+    update_target_partition_counts(masknorms, is_target_sample, keep_masked_kmer, sample_counts);
+    
+    vector<bool> selected_samples(totalsamples, false);
+    for (size_t i = 0; i < sample_counts.size(); ++i)
+    {
+        selected_samples[i] = sample_counts[i] >= cutoff;
+    }
+    
+    prune_target_partition_kmers(norms, selected_samples, keep_kmer);
+    prune_target_partition_kmers(masknorms, selected_samples, keep_masked_kmer);
+    
+    std::string kmer_output = outputfile + "_kmer.list";
+    std::ofstream kmerfile(kmer_output);
+    if (!kmerfile.is_open())
+    {
+        std::cerr << "Failed to open file: " << kmer_output << "\n";
+        return;
+    }
+    
+    for (const auto &pair : kmer_hash)
+    {
+        if (pair.second < keep_kmer.size() && keep_kmer[pair.second])
         {
-            if (currnorm[i] == 1 )
+            if (pair.second < kmer_texts.size() && !kmer_texts[pair.second].empty())
             {
-                if (groupindex > 0 && groupindex != groups[i])
-                {
-                    groupindex = 0;
-                    break;
-                }
-                else
-                {
-                    groupindex = groups[i];
-                }
-                
+                kmerfile << ">\n" << kmer_texts[pair.second] << "\n";
             }
-        }
-        
-        uint writeindex = groupsort[groupindex];
-        
-        if (not ifopen[writeindex])
-        {
-            kmerfiles[writeindex].open(filenames[writeindex]);
-            if (!kmerfiles[writeindex].is_open()) {
-                std::cerr << "Failed to open file: " << filenames[writeindex] << "\n";
-                continue;
-            }
-            ifopen[writeindex] = 1;
-        }
-
-        kmerfiles[writeindex] << ">\n"+kmer_int_toatcg(pair.first)+"\n";
-    }
-    
-    
-    for (const auto& pair : masked_hash)
-    {
-        vector<bool> & currnorm = masknorms[pair.second];
-        uint groupindex = 0;
-        for (int i = 0 ; i < groups.size(); ++i)
-        {
-            if (currnorm[i] == 1 )
+            else
             {
-                if (groupindex > 0 && groupindex != groups[i])
-                {
-                    groupindex = 0;
-                    break;
-                }
-                else
-                {
-                    groupindex = groups[i];
-                }
-                
+                kmerfile << ">\n" << kmer_int_toatcg(pair.first) << "\n";
             }
         }
-        
-        uint writeindex = groupsort[groupindex];
-        
-        if (not ifopen[writeindex])
-        {
-            kmerfiles[writeindex].open(filenames[writeindex]);
-            if (!kmerfiles[writeindex].is_open()) {
-                std::cerr << "Failed to open file: " << filenames[writeindex] << "\n";
-                continue;
-            }
-            ifopen[writeindex] = 1;
-        }
-
-        kmerfiles[writeindex] << ">\n"+kmer_int_toatcg_l(pair.first)+"\n";
     }
-    kmerfiles.clear();
     
-    std::vector<std::ofstream> seqfiles(counter);
-
-    seqfiles[0].open(outputfile + "_filtered.fa");
-    for (int i = 1; i < counter; ++i)
+    for (const auto &pair : masked_hash)
     {
-        if (ifopen[i] == 0) continue;
-        
-        auto filename = outputfile + "p" + std::to_string(i)+".fa";
-        seqfiles[i].open(filename);
-
-        if (!seqfiles[i].is_open()) {
-            std::cerr << "Failed to open file: " << filename << "\n";
-            continue;
+        if (pair.second < keep_masked_kmer.size() && keep_masked_kmer[pair.second])
+        {
+            if (pair.second < masked_kmer_texts.size() && !masked_kmer_texts[pair.second].empty())
+            {
+                kmerfile << ">\n" << masked_kmer_texts[pair.second] << "\n";
+            }
+            else
+            {
+                kmerfile << ">\n" << kmer_int_toatcg_l(pair.first) << "\n";
+            }
         }
+    }
+    
+    if (ifbed)
+    {
+        write_bed_selected_assignments(inputfile, outputfile, selected_samples, "1");
+        return;
+    }
+    
+    std::string fasta_output = outputfile;
+    std::ofstream seqfile(fasta_output);
+    if (!seqfile.is_open())
+    {
+        std::cerr << "Failed to open file: " << fasta_output << "\n";
+        return;
     }
     
     fasta fastafile(inputfile.c_str());
     std::string StrLine;
     int sample_index = -1;
-    int sample_group = 0;
+    bool write_this_sample = false;
+    
     while (fastafile.nextLine(StrLine))
     {
-        switch (StrLine[0])
+        if (!StrLine.empty() && StrLine[0] == '>')
         {
-            case '>':
-                sample_index ++;
-                sample_group = groupsort[groups[sample_index]];
-                if (not ifopen[sample_group]) sample_group = 0;
-                break;
-            default:
-                break;
+            sample_index++;
+            write_this_sample = sample_index >= 0 &&
+                                static_cast<size_t>(sample_index) < selected_samples.size() &&
+                                selected_samples[sample_index];
         }
-        seqfiles[sample_group] << StrLine + "\n";
+        
+        if (write_this_sample)
+        {
+            seqfile << StrLine << "\n";
+        }
     }
-    seqfiles.clear();
+    
     fastafile.Close();
-    
-    
-    
-    
+}
 
-    return ;
+template <int dictsize>
+void kmer_counter<dictsize>::write(string &inputfile, string &outputfile, vector<uint> & groups, vector<vector<bool>> &norms)
+{
+    vector<uint> groupsort;
+    uint counter = compute_group_order(groups, groupsort);   // 0..counter-1
+
+    // Precompute sample -> output bucket
+    vector<uint> sample_writeindex(groups.size(), 0);
+    for (size_t i = 0; i < groups.size(); ++i)
+    {
+        sample_writeindex[i] = groupsort[groups[i]];
+    }
+
+    if (ifbed)
+    {
+        vector<std::string> bed_scores(sample_writeindex.size(), "0");
+        for (size_t i = 0; i < sample_writeindex.size(); ++i)
+        {
+            bed_scores[i] = std::to_string(sample_writeindex[i]);
+        }
+        write_bed_assignments(inputfile, outputfile, bed_scores);
+        return;
+    }
+
+    auto resolve_writeindex = [&](const vector<bool>& currnorm) -> uint
+    {
+        uint groupindex = 0;
+        for (size_t i = 0; i < groups.size(); ++i)
+        {
+            if (currnorm[i])
+            {
+                if (groupindex > 0 && groupindex != groups[i])
+                {
+                    return 0; // mixed groups => filtered
+                }
+                groupindex = groups[i];
+            }
+        }
+        return groupsort[groupindex];
+    };
+
+    uint total_group_outputs = (counter > 1) ? (counter - 1) : 0;
+    uint num_batches = std::max<uint>(
+        1,
+        (total_group_outputs + MAX_OPEN_GROUP_FILES_PER_PASS - 1) / MAX_OPEN_GROUP_FILES_PER_PASS
+    );
+
+    // -----------------------------
+    // Pass 1: write *.fa_kmer.list
+    // -----------------------------
+    for (uint batch_id = 0; batch_id < num_batches; ++batch_id)
+    {
+        uint batch_begin = 1 + batch_id * MAX_OPEN_GROUP_FILES_PER_PASS;
+        uint batch_end   = std::min(counter, batch_begin + MAX_OPEN_GROUP_FILES_PER_PASS);
+        bool include_filtered = (batch_id == 0);
+
+        std::ofstream filtered_kmerfile;
+        if (include_filtered)
+        {
+            filtered_kmerfile.open(outputfile + "_filtered.fa_kmer.list");
+            if (!filtered_kmerfile.is_open())
+            {
+                std::cerr << "Failed to open file: " << outputfile + "_filtered.fa_kmer.list" << "\n";
+                return;
+            }
+        }
+
+        std::vector<std::ofstream> kmerfiles(batch_end > batch_begin ? batch_end - batch_begin : 0);
+        for (uint writeindex = batch_begin; writeindex < batch_end; ++writeindex)
+        {
+            std::string fname = outputfile + "p" + std::to_string(writeindex) + ".fa_kmer.list";
+            kmerfiles[writeindex - batch_begin].open(fname);
+            if (!kmerfiles[writeindex - batch_begin].is_open())
+            {
+                std::cerr << "Failed to open file: " << fname << "\n";
+            }
+        }
+
+        for (const auto& pair : kmer_hash)
+        {
+            const vector<bool>& currnorm = norms[pair.second];
+            uint writeindex = resolve_writeindex(currnorm);
+
+            if (writeindex == 0)
+            {
+                if (include_filtered)
+                    filtered_kmerfile << ">\n" << kmer_int_toatcg(pair.first) << "\n";
+            }
+            else if (writeindex >= batch_begin && writeindex < batch_end)
+            {
+                auto& out = kmerfiles[writeindex - batch_begin];
+                if (out.is_open())
+                    out << ">\n" << kmer_int_toatcg(pair.first) << "\n";
+            }
+        }
+
+        for (const auto& pair : masked_hash)
+        {
+            const vector<bool>& currnorm = masknorms[pair.second];
+            uint writeindex = resolve_writeindex(currnorm);
+
+            if (writeindex == 0)
+            {
+                if (include_filtered)
+                    filtered_kmerfile << ">\n" << kmer_int_toatcg_l(pair.first) << "\n";
+            }
+            else if (writeindex >= batch_begin && writeindex < batch_end)
+            {
+                auto& out = kmerfiles[writeindex - batch_begin];
+                if (out.is_open())
+                    out << ">\n" << kmer_int_toatcg_l(pair.first) << "\n";
+            }
+        }
+    }
+
+    // -----------------------------
+    // Pass 2: write *.fa
+    // -----------------------------
+    for (uint batch_id = 0; batch_id < num_batches; ++batch_id)
+    {
+        uint batch_begin = 1 + batch_id * MAX_OPEN_GROUP_FILES_PER_PASS;
+        uint batch_end   = std::min(counter, batch_begin + MAX_OPEN_GROUP_FILES_PER_PASS);
+        bool include_filtered = (batch_id == 0);
+
+        std::ofstream filtered_seqfile;
+        if (include_filtered)
+        {
+            filtered_seqfile.open(outputfile + "_filtered.fa");
+            if (!filtered_seqfile.is_open())
+            {
+                std::cerr << "Failed to open file: " << outputfile + "_filtered.fa" << "\n";
+                return;
+            }
+        }
+
+        std::vector<std::ofstream> seqfiles(batch_end > batch_begin ? batch_end - batch_begin : 0);
+        for (uint writeindex = batch_begin; writeindex < batch_end; ++writeindex)
+        {
+            std::string fname = outputfile + "p" + std::to_string(writeindex) + ".fa";
+            seqfiles[writeindex - batch_begin].open(fname);
+            if (!seqfiles[writeindex - batch_begin].is_open())
+            {
+                std::cerr << "Failed to open file: " << fname << "\n";
+            }
+        }
+
+        fasta fastafile(inputfile.c_str());
+        std::string StrLine;
+        int sample_index = -1;
+        int active_writeindex = -1;
+        bool write_this_sample = false;
+
+        while (fastafile.nextLine(StrLine))
+        {
+            if (!StrLine.empty() && StrLine[0] == '>')
+            {
+                sample_index++;
+                active_writeindex = static_cast<int>(sample_writeindex[sample_index]);
+
+                if (active_writeindex == 0)
+                    write_this_sample = include_filtered;
+                else
+                    write_this_sample = (active_writeindex >= (int)batch_begin &&
+                                         active_writeindex <  (int)batch_end);
+            }
+
+            if (!write_this_sample) continue;
+
+            if (active_writeindex == 0)
+            {
+                filtered_seqfile << StrLine << "\n";
+            }
+            else
+            {
+                auto& out = seqfiles[active_writeindex - batch_begin];
+                if (out.is_open())
+                    out << StrLine << "\n";
+            }
+        }
+
+        fastafile.Close();
+    }
 }
 
 
 #endif /* KmerCounter_hpp */
-

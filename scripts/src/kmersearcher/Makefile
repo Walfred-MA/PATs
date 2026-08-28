@@ -1,22 +1,21 @@
-# === Compiler and Flags ===
-CXX := g++
-CXXFLAGS := -Wall -std=c++17 -O3 -flto
-LDFLAGS := -lz -pthread -lhts
+CXX ?= g++
+CPPFLAGS ?=
+CXXFLAGS ?= -Wall -std=c++17 -O3 -DCOUNTINT=uint8_t
+LDFLAGS ?=
+LDLIBS ?= -lhts -lcurl -lz -pthread
 
-# === Sources ===
-SRC_DIR := src
-SRCS := $(wildcard $(SRC_DIR)/*.cpp)
+# === Source Files ===
+SRC_DIR  := src
+SRCS     := $(wildcard $(SRC_DIR)/*.cpp)
+TARGET   := kmer_searcher
 
-# === Targets ===
-TARGETS := kmer_searcher
+# === Rules ===
+all: $(TARGET)
 
-all: $(TARGETS)
-
-kmer_searcher: $(SRCS)
-	$(CXX) $(CXXFLAGS) -DCOUNTINT=uint8_t $^ -o $@ $(LDFLAGS)
+$(TARGET): $(SRCS)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
 
 clean:
-	rm -f $(TARGETS) *.o
+	rm -f $(TARGET) *.o
 
 .PHONY: all clean
-

@@ -27,10 +27,12 @@
 #include "fasta.hpp"
 #include "KmerStruct.hpp"
 #include "KmerHash.hpp"
+#include "Blacklist.hpp"
 
 using namespace std;
 
 extern bool ifmask;
+extern bool strict_mod;
 
 using kmer64_dict = std::unordered_map<u128, uint, hash_128> ;
 using kmer32_dict = std::unordered_map<ull, uint > ;
@@ -311,29 +313,37 @@ void kmer_counter<dictsize>::read_counttarget(std::string &infile)
     unordered_set<ull> allkmers;
     
     std::string StrLine;
+    BlacklistIntervals::HeaderRegion blacklist_region;
+    unsigned long long sequence_offset = 0;
     
     while (fastafile.nextLine(StrLine))
     {
+        if (StrLine.empty()) continue;
+
         switch (StrLine[0])
         {
             case '@':  case '+': case '>':
                 current_size = 0;
+                sequence_offset = 0;
+                blacklist_region = blacklist_intervals.parse_header_region(StrLine);
                 continue;
             case ' ': case '\n': case '\t':
                 continue;
             default:
                 break;
         }
-        
+
         for (auto base: StrLine)
         {
             if (base == '\0') break;
             
             if (base == '\n' || base == ' ') continue;
 
+            sequence_offset++;
             kmer_read_c(base, current_size, current_kmer, reverse_kmer);
            
             if (current_size < klen || (ifmask && base >= 'a') ) continue;
+            if (blacklist_intervals.overlaps_sequence_span(blacklist_region, sequence_offset - klen, sequence_offset)) continue;
                                 
             auto larger_kmer = (current_kmer >= reverse_kmer) ? current_kmer : reverse_kmer;
             
@@ -348,7 +358,15 @@ void kmer_counter<dictsize>::read_counttarget(std::string &infile)
         if (kmer_hash.ifadd(larger_kmer, totalkmers)) totalkmers++;
     }
     
-    write_cache((infile+"_allkmer.cache").c_str(), allkmers);
+    std::string cachefile = infile + "_allkmer.cache";
+    if (blacklist_intervals.enabled())
+    {
+        std::remove(cachefile.c_str());
+    }
+    else
+    {
+        write_cache(cachefile.c_str(), allkmers);
+    }
     
     cout << "finishing loading kmers: "<< string(fastafile.filepath) << endl;
     cout << "total kmers: "<< totalkmers << endl;
@@ -393,13 +411,19 @@ bool kmer_counter<dictsize>::count_target(typefile &fastafile, string prefix, km
     std::string StrLine;
     std::string Header;
     bool istarget = 0;
+    BlacklistIntervals::HeaderRegion blacklist_region;
+    unsigned long long sequence_offset = 0;
     while (fastafile.nextLine(StrLine))
     {
+        if (StrLine.empty()) continue;
+
         switch (StrLine[0])
         {
             case '@':  case '+': case '>':
                 current_size = 0;
                 istarget = isTarget(StrLine, prefix);
+                sequence_offset = 0;
+                blacklist_region = blacklist_intervals.parse_header_region(StrLine);
                 continue;
             case ' ': case '\n': case '\t':
                 continue;
@@ -417,9 +441,11 @@ bool kmer_counter<dictsize>::count_target(typefile &fastafile, string prefix, km
                         
             if (base == '\n' || base == ' ') continue;
  
+            sequence_offset++;
             kmer_read_c(base, current_size, current_kmer, reverse_kmer);
             
             if (current_size < klen) continue;
+            if (blacklist_intervals.overlaps_sequence_span(blacklist_region, sequence_offset - klen, sequence_offset)) continue;
             
             ull larger_kmer = (current_kmer >= reverse_kmer) ? current_kmer:reverse_kmer;
              
@@ -569,7 +595,7 @@ void kmer_counter<dictsize>::read_file()
             fasta targetfile(targetfiles[j].c_str());
             
             bool iffind = count_target(targetfile,prefix, target_map_nt);
-            if (iffind == 0) target_map_nt.clear();
+            if (iffind == 0 && !strict_mod) target_map_nt.clear();
 
             auto outputfile = outputfiles[j] + prefix;
             write(outputfile.c_str(), kmer_hash, samplevecs, target_map_nt);
@@ -622,4 +648,3 @@ void kmer_counter<dictsize>::write(const char * outputfile, Kmer32_hash &target_
 
 
 #endif /* KmerCounter_hpp */
-

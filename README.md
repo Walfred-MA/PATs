@@ -10,7 +10,7 @@ the Snakemake workflow.
 
 Requirements (high level)
 ----------------------------
-- Linux environment with bash, Python 3, samtools, and Snakemake
+- Linux environment with bash, Python 3.10, samtools, and Snakemake 6.5.0
 - Compilers/tools for C++ utilities in `snakemake/` (see that folder’s README)
 - PAT repository layout with subfolders:
   masking/  tools/  snakemake/  scripts/
@@ -22,6 +22,7 @@ We provide an automatic script to help set up the required binaries and Python d
 
 Requirements:
 - Python 3.10
+- Snakemake 6.5.0 with PuLP 2.7.0 (installed automatically from `requirements.txt`)
 - A valid Conda environment (recommended)
 - C++ compiler (g++ ≥ 8)
 - Internet access to install dependencies via conda
@@ -79,6 +80,27 @@ Notes:
 - If mixing CHM13 and hg38, distinguish contigs using FASTA header prefixes:
     - CHM13: NC_0609... (e.g., NC_060925.1 for chr1)
     - hg38 : chr... (e.g., chr1)
+
+Reference-name resolution during graph construction:
+- A contig name containing `#` uses its explicit `sample#haplotype#contig`
+  identity. For example, `CHM13#1#chr1` resolves to query-table sample
+  `CHM13_h1`; the `chr1` suffix does not make it hg38.
+- Implicit CHM13/hg38 inference is used only when the contig name contains no
+  `#` characters.
+- Without `#`, a contig containing `NC_0609` resolves to `CHM13_h1`.
+  Therefore a `CHM13_h1` reference using implicit inference must retain its
+  `NC_0609...` chromosome names.
+- Without `#`, all other contig names—including `chr1`, `chr2`, and other
+  `chr*` names—resolve to `HG38_h1`.
+
+Graph construction order:
+- Reference records identified by `graphmake.py -p ref1,ref2,...` are placed
+  first, retaining their relative order from the input multi-FASTA.
+- Every non-reference record follows in its original multi-FASTA order. There
+  is no sorting by assembly name, sequence size, masking, or filename.
+- The PATs workflow supplies `-p` automatically from the first query-table
+  reference. When running `graphmake.py` directly without `-p`, put the
+  reference records first in the input multi-FASTA.
 
 Make sure these prefixes match your FASTA headers.
 Example file can be seen in pipeline/query_pathes.txt_example.txt. 
@@ -185,6 +207,33 @@ This creates:
 - All_matrix.txt         → merged matrix
 - All_matrix.txt.index   → index file
 ```
+
+Matrix format v2.0.1
+--------------------
+
+`matrixcompile.py` writes fixed-width k-mer metadata. A k-mer row has six
+tab-separated fields:
+
+```
+row marker | tag(3) | path+strand(3) + qindex(3) | size(4) + qpos(4) + rpos(4) | k-mer(11) | allele indexes
+```
+
+The three-character path field stores `(path_index << 1) | strand`, where
+strand is `0` for `+` and `1` for `-`. The k-mer begins at byte offset 27 and
+the allele-index field begins at byte offset 39. Internal `|` separators are
+not used. All numeric fields use the existing 64-character integer encoding.
+
+Limits are path index `0..32767`, query index `0..262143`, and
+size/query-position/reference-position `0..16777215`. Compilation stops with
+an error if a value is outside its field range; paths are never combined into
+a virtual overflow path.
+
+`matrixindex.py` writes this as the first index line:
+
+```
+@v2.0.1,support:v1.2.0
+```
+
 Note: You might need a background kmer file, which can be obtained from Ctyper's GitHub site, and you may name it as All_matrix.txt.bgd for your convenient
 
 4) Tips & Gotchas
@@ -202,6 +251,3 @@ Questions / Issues
 - See `masking/` and `snakemake/` READMEs
 - For BED help: python tools/gff_toGeneBed.py -h
 - If problems arise, double-check FASTA paths and index files.
-
-
-

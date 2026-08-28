@@ -4,9 +4,11 @@
 # =========================================================
 
 # Compiler and flags
-CXX      := g++
-CXXFLAGS := -O3 -std=c++17 -fopenmp -Wall -Wextra -mtune=native
-LDFLAGS  := -fopenmp -lz
+CXX ?= g++
+CPPFLAGS ?=
+CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra
+LDFLAGS ?=
+LDLIBS ?= -lz
 
 # Directories
 SRC_DIR  := src
@@ -31,7 +33,7 @@ all: $(TARGET)
 
 $(TARGET): $(OBJ_DIR) $(OBJS)
 	@echo "🔗 Linking $(TARGET)..."
-	$(CXX) $(OBJS) -o $@ $(LDFLAGS)
+	$(CXX) $(OBJS) -o $@ $(LDFLAGS) $(LDLIBS)
 	@echo "✅ Build complete: $@"
 
 $(OBJ_DIR):
@@ -39,7 +41,7 @@ $(OBJ_DIR):
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp
 	@echo "⚙️  Compiling $< ..."
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 # =========================================================
 # Cleaning
@@ -52,4 +54,3 @@ clean:
 rebuild: clean all
 
 .PHONY: all clean rebuild
-

@@ -1,0 +1,29 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.so
+*.o
+*.d
+build/
+dist/
+*.egg-info/
+
+# Locally installed PATs binaries; build them with install.py.
+/scripts/kmer_convertor8
+/scripts/kmer_searcher
+/scripts/kmerpartition
+/scripts/kmer_selector
+/scripts/kmernorm
+/scripts/kmerstrd
+/scripts/kmertree
+
+# Binaries built inside source directories.
+/scripts/src/kmerconverter/kmer_convertor
+/scripts/src/kmerconverter/kmer_convertor8
+/scripts/src/kmersearcher/kmer_searcher
+/scripts/src/kmerpartition/kmerpartition
+/scripts/src/kmerselector/kmer_selector
+/scripts/src/kmernorm/kmernorm
+/scripts/src/kmerstrd/kmerstrd
+/scripts/src/kmertree/kmertree
+/tools/KmerIndex/kmerindex

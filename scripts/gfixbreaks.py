@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import copy
 import os
 import threading
 import argparse
@@ -10,42 +11,371 @@ import re
 import glob
 import json
 import hashlib 
+import pickle
+import sqlite3
+import tempfile
+import bisect
+import shutil
+import subprocess
 from statistics import median
 
 script_folder = os.path.dirname(os.path.abspath(__file__))
+tool_folder = script_folder
+
+# Query-table aware sample resolution. Explicit sample#hap#contig names take
+# precedence. For unencoded contigs only, retain the historical CHM13/HG38
+# inference before consulting the query FASTA indexes.
+_query_haplopaths = {}
+_contig_to_haplotypes = cl.defaultdict(list)
+_group_prefix = ""
+_reference_sample = ""
+_reported_contig_aliases = set()
+
+
+def load_haplopaths(queryfile):
+	haplopaths = {}
+	contig_map = cl.defaultdict(list)
+	with open(queryfile, mode="r") as handle:
+		for raw in handle:
+			if not raw.strip() or raw.lstrip().startswith("#"):
+				continue
+			fields = raw.split()
+			if len(fields) < 2:
+				continue
+			sample, fasta = fields[0], fields[1]
+			haplopaths[sample] = fasta
+		try:
+			with open(fasta + ".fai", mode="r") as index_handle:
+				for row in index_handle:
+					parts = row.split()
+					if parts and sample not in contig_map[parts[0]]:
+						contig_map[parts[0]].append(sample)
+		except FileNotFoundError:
+			pass
+	return haplopaths, contig_map
+
+
+def resolve_haplotype(contig, haplopaths, name=""):
+	for sample in sorted(haplopaths, key=len, reverse=True):
+		if sample and sample in name:
+			return sample
+	if "#" in contig:
+		encoded_sample = "_h".join(contig.split("#")[:2])
+		if encoded_sample in haplopaths:
+			return encoded_sample
+	else:
+		implicit_sample = "CHM13_h1" if "NC_0609" in contig else "HG38_h1"
+		if implicit_sample in haplopaths:
+			return implicit_sample
+	candidates = [sample for sample in _contig_to_haplotypes.get(contig, []) if sample in haplopaths]
+	if len(candidates) == 1:
+		return candidates[0]
+	if not candidates:
+		raise KeyError("No query FASTA contains contig {!r} (record {!r})".format(contig, name))
+	raise ValueError(
+		"Contig {!r} occurs in multiple query FASTAs; record {!r} does not identify a sample: {}".format(
+			contig, name, ", ".join(candidates)
+		)
+	)
+
+
+def resolve_fasta_contig(contig, haplotype):
+	"""Map an internal ``contig_N`` locus key back to a real FASTA contig."""
+	if haplotype in _contig_to_haplotypes.get(contig, []):
+		return contig
+	match = re.fullmatch(r"(.+)_([0-9]+)", contig)
+	if match:
+		candidate = match.group(1)
+		if haplotype in _contig_to_haplotypes.get(candidate, []):
+			mapping = (contig, candidate, haplotype)
+			if mapping not in _reported_contig_aliases:
+				print(
+					"[PATs] internal locus contig {!r} resolved to FASTA contig {!r} for {}".format(
+						contig, candidate, haplotype
+					),
+					flush=True,
+				)
+				_reported_contig_aliases.add(mapping)
+			return candidate
+	return contig
+
+
+def resolve_tool(*names):
+	for name in names:
+		candidate = os.path.join(tool_folder, name)
+		if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+			return candidate
+	for name in names:
+		candidate = shutil.which(name)
+		if candidate:
+			return candidate
+	raise FileNotFoundError("Missing executable: {} (tools directory: {})".format(", ".join(names), tool_folder))
 cutoffdistance = 30000
+mergesmall = 20000
 cache = ""
+OVERLAP_PASSED_STATE_LIMIT = max(
+	1, int(os.environ.get("GFIXBREAKS_PASSED_STATE_LIMIT", "10000")),
+)
+OVERLAP_DEDUP_STATE_LIMIT = 50000
+
+
+class _OverlapState:
+	"""Compact persistent state used internally by graphDB.overlap_genes."""
+
+	__slots__ = (
+		"parent", "ichunk", "chunkindex", "involves", "qstart", "qend",
+		"depth", "min_ichunk", "max_ichunk",
+	)
+
+	def __init__(self, parent, ichunk, chunkindex, involves, qstart, qend):
+		self.parent = parent
+		self.ichunk = ichunk
+		self.chunkindex = chunkindex
+		self.involves = tuple(involves)
+		self.qstart = qstart
+		self.qend = qend
+		if parent is None:
+			self.depth = 1
+			self.min_ichunk = ichunk
+			self.max_ichunk = ichunk
+		else:
+			self.depth = parent.depth + 1
+			self.min_ichunk = min(parent.min_ichunk, ichunk)
+			self.max_ichunk = max(parent.max_ichunk, ichunk)
+
+	def exact_child_key(self):
+		"""Key that only merges children with the identical parent/history."""
+		return (
+			id(self.parent), self.ichunk, self.chunkindex, self.involves,
+			self.qstart, self.qend,
+		)
+
+	def max_score(self):
+		return max(x[2] for x in self.involves)
+
+	def materialize(self):
+		"""Convert a selected persistent state to the legacy six-list form."""
+		nodes = []
+		state = self
+		while state is not None:
+			nodes.append(state)
+			state = state.parent
+		nodes.reverse()
+		return [
+			[x.ichunk for x in nodes],
+			[x.chunkindex for x in nodes],
+			list(self.involves),
+			nodes[0].qstart,
+			nodes[-1].qend,
+			[[x.qstart, x.qend] for x in nodes],
+		]
+
+
+class _DPOverlapState:
+	"""One polynomial-DP state for a single reference path traversal.
+
+	Future transitions depend only on the first/last query chunks, the current
+	reference path position, and the accumulated score.  ``parent`` is retained
+	only to reconstruct the selected query chunks after the DP finishes.
+	"""
+
+	__slots__ = (
+		"parent", "ichunk", "chunkindex", "gene", "alignindex", "score",
+		"qstart", "qend", "first_ichunk", "depth",
+	)
+
+	def __init__(
+		self, parent, ichunk, chunkindex, gene, alignindex, score, qstart, qend,
+	):
+		self.parent = parent
+		self.ichunk = ichunk
+		self.chunkindex = chunkindex
+		self.gene = gene
+		self.alignindex = alignindex
+		self.score = score
+		self.qstart = qstart
+		self.qend = qend
+		if parent is None:
+			self.first_ichunk = ichunk
+			self.depth = 1
+		else:
+			self.first_ichunk = parent.first_ichunk
+			self.depth = parent.depth + 1
+
+	def active_key(self):
+		return (
+			self.first_ichunk, self.ichunk, self.gene, self.alignindex,
+		)
+
+	def interval_key(self):
+		return self.first_ichunk, self.ichunk
+
+	def materialize(self):
+		nodes = []
+		state = self
+		while state is not None:
+			nodes.append(state)
+			state = state.parent
+		nodes.reverse()
+		return [
+			[x.ichunk for x in nodes],
+			[x.chunkindex for x in nodes],
+			[(self.gene, self.alignindex, self.score)],
+			nodes[0].qstart,
+			nodes[-1].qend,
+			[[x.qstart, x.qend] for x in nodes],
+		]
+
+
+class _BestIntervalStates:
+	"""Retain only the best completed state for each query interval."""
+
+	def __init__(self):
+		self.states = {}
+		self.ordinal = 0
+
+	def add(self, state):
+		ordinal = self.ordinal
+		self.ordinal += 1
+		key = state.interval_key()
+		old = self.states.get(key)
+		if old is None or state.score > old[0]:
+			self.states[key] = (state.score, ordinal, state)
+
+	def extend(self, states):
+		for state in states:
+			self.add(state)
+
+	def iter_sorted(self):
+		for _score, _ordinal, state in sorted(
+			self.states.values(), key=lambda item: (-item[0], item[1]),
+		):
+			yield state.materialize()
+
+
+class _PassedStateStore:
+	"""Bound completed overlap states in RAM, spilling excess to SQLite."""
+
+	def __init__(self, memory_limit=None):
+		if memory_limit is None:
+			memory_limit = OVERLAP_PASSED_STATE_LIMIT
+		self.memory_limit = max(1, int(memory_limit))
+		self.states = []
+		self.connection = None
+		self.path = ""
+		self.ordinal = 0
+
+	def _open(self):
+		if self.connection is not None:
+			return
+		fd, self.path = tempfile.mkstemp(
+			prefix=".gfixbreaks.overlap.", suffix=".sqlite3",
+		)
+		os.close(fd)
+		self.connection = sqlite3.connect(self.path)
+		self.connection.execute("PRAGMA journal_mode=OFF")
+		self.connection.execute("PRAGMA synchronous=OFF")
+		self.connection.execute("PRAGMA temp_store=FILE")
+		self.connection.execute("PRAGMA cache_size=-8192")
+		self.connection.execute(
+			"CREATE TABLE states (score INTEGER, ordinal INTEGER, state BLOB)"
+		)
+		for state in self.states:
+			self._insert(state)
+		self.states = []
+
+	def _insert(self, state):
+		payload = pickle.dumps(state.materialize(), protocol=5)
+		self.connection.execute(
+			"INSERT INTO states VALUES (?, ?, ?)",
+			(state.max_score(), self.ordinal, sqlite3.Binary(payload)),
+		)
+		self.ordinal += 1
+
+	def add(self, state):
+		# determinegenes() discarded these states before sorting.
+		if len(state.involves) == 0:
+			return
+		if self.connection is None and len(self.states) < self.memory_limit:
+			self.states.append(state)
+			self.ordinal += 1
+			return
+		if self.connection is None:
+			# _insert() assigns ordinals while flushing. Rewind so their order
+			# remains identical to the original passed_genes list.
+			self.ordinal = 0
+			self._open()
+		self._insert(state)
+
+	def extend(self, states):
+		for state in states:
+			self.add(state)
+
+	def iter_sorted(self):
+		if self.connection is None:
+			for state in sorted(
+				self.states, key=lambda x: x.max_score(), reverse=True,
+			):
+				yield state.materialize()
+			return
+		self.connection.commit()
+		for payload, in self.connection.execute(
+			"SELECT state FROM states ORDER BY score DESC, ordinal ASC"
+		):
+			yield pickle.loads(payload)
+
+	def close(self):
+		if self.connection is not None:
+			self.connection.close()
+			self.connection = None
+		if self.path:
+			try:
+				os.remove(self.path)
+			except FileNotFoundError:
+				pass
+			self.path = ""
+		self.states = []
+
+
+def _deduplicate_overlap_states(states):
+	"""Drop only states with identical parent identity and current contents."""
+	# A temporary hash table larger than this could itself become the peak-RAM
+	# allocation. Skipping optional deduplication leaves results unchanged.
+	if len(states) > OVERLAP_DEDUP_STATE_LIMIT:
+		return states
+	seen = set()
+	output = []
+	for state in states:
+		key = state.exact_child_key()
+		if key in seen:
+			continue
+		seen.add(key)
+		output.append(state)
+	return output
 
 def process_locus2(region, haplopath, folder, outputfile):
 	
 	newname,  contig, start, end, ifexon, mapinfo = region
 	
-	if "#" not in contig: 
-		haplo = "CHM13_h1" if "NC_0609" in contig else "HG38_h1"
-	else:
-		haplo = "_h".join(contig.split("#")[:2])
+	haplo = resolve_haplotype(contig, haplopath, newname)
+	contig = resolve_fasta_contig(contig, haplo)
 		
 	path = haplopath[haplo]
-	
-	outputfile0 = os.path.join(folder, f"{newname}.fa")
+	if max(0, end) - max(0,start) <= 0:
+		return
+	#outputfile0 = os.path.join(folder, f"{newname}.fa")
 	start = max(0,int(start))
 	header = ">{}\t{}:{}-{}\t{}\t{}".format(newname, contig, start, end, ifexon, mapinfo)
 	
 	cmd1 = f'echo "{header}" >> {outputfile} && samtools faidx {path} {contig}:{start+1}-{end} | tail -n +2 >> {outputfile}'
 	os.system(cmd1)
 	
-	return outputfile0
-
 
 def makenewfasta2(regions, queryfile, outputfile, folder, threads):
 	
-	haplopath = dict()
-	with open(queryfile, mode = 'r') as f:
-		for line in f:
-			line = line.strip().split()
-			haplopath[line[0]] = line[1]
+	haplopath, _ = load_haplopaths(queryfile)
 			
-	os.system("rm {} || true ".format(outputfile))
+	os.system("> {} ".format(outputfile))
 	
 	alloutputs = []
 	
@@ -60,7 +390,7 @@ def makenewfasta2(regions, queryfile, outputfile, folder, threads):
 		# Wait for all threads to complete
 		#concurrent.futures.wait(futures)
 		
-def makegraph(fastafile, folder, threads):
+def makegraph(fastafile, folder, threads, reflist = []):
 	
 	#os.system(f"{script_folder}/kmernorm -i {fastafile} -o {fastafile}_norm.gz -w 0 -m 1")
 	#os.system(f"rm {fastafile}_part*.fa || true");
@@ -74,26 +404,24 @@ def makegraph(fastafile, folder, threads):
 		
 	for file in files:
 		pass
-		os.system("python {}/graphmake.py -i {}  -d {} -t {} -l 0 ".format(script_folder, file, folder, threads))
+		os.system("python {}/graphmake.py -i {}  -d {} -t {} -l 0 -p \"{}\" -u 1".format(script_folder, file, folder, threads, ",".join(reflist)))
 		
 	return files
 
 def process_locus(index, line, haplopath, folder, outputfile):
 	line = line.strip().split()
+	name = line[0]
+	line = line[1:]
 	contig = line[0]
-	
-	if "#" not in contig: 
-		haplo = "CHM13_h1" if "NC_0609" in contig else "HG38_h1"
-	else:
-		haplo = "_h".join(contig.split("#")[:2])
+	haplo = resolve_haplotype(contig, haplopath, name)
 		
 	path = haplopath[haplo]
 	strd = "-i" if line[1] == "-" else ""
 	
-	outputfile0 = os.path.join(folder, f"loci_{index}.fa")
+	outputfile0 = os.path.join(folder, f"{name}.fa")
 	
 	line[2] = max(0,int(line[2]))
-	header = ">loci_{}\t{}:{}-{}{}\t{}".format(index, contig, line[2], line[3], line[1], line[4])
+	header = ">{}\t{}:{}-{}{}\t{}".format(name, contig, line[2], line[3], line[1], line[4])
 	
 	if os.path.isfile(path):
 		cmd1 = f'echo "{header}" > {outputfile0} && samtools faidx {path} {contig}:{line[2]+1}-{line[3]} {strd} | tail -n +2 >> {outputfile0}'
@@ -102,25 +430,23 @@ def process_locus(index, line, haplopath, folder, outputfile):
 	return outputfile0
 
 
-def makenewfasta(locifile, queryfile, outputfile, folder, threads):
+def makenewfasta(locifile, queryfile, outputfile, folder, threads, refprefix):
 	
-	haplopath = dict()
-	with open(queryfile, mode = 'r') as f:
-		for line in f:
-			line = line.strip().split()
-			haplopath[line[0]] = line[1]
+	haplopath, _ = load_haplopaths(queryfile)
 			
 	os.system("echo > "+outputfile)
 	
+	refs = []
 	alloutputs = []
 	with open(locifile, mode='r') as f:
 		with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
 			futures = []
 			for index, line in enumerate(f, start=1):
+				name = line.split()[0]
 				# Submit jobs to executor
 				#process_locus(index, line, haplopath, folder, outputfile)
-				futures.append(executor.submit(process_locus, index, line, haplopath, folder, outputfile))
-				alloutputs.append(os.path.join(folder, f"loci_{index}.fa"))
+				futures.append(executor.submit(process_locus, name, line, haplopath, folder, outputfile))
+				alloutputs.append(os.path.join(folder, f"{name}.fa"))
 			# Wait for all threads to complete
 			concurrent.futures.wait(futures)
 			
@@ -130,18 +456,107 @@ def makenewfasta(locifile, queryfile, outputfile, folder, threads):
 		os.system(cmd2)
 		
 		
-def findbreaks(inputfile, assemfile, outputfile):
+def Overlap2(query, ref):
 	
+	nquery = 2*len(query)
+	
+	all_coordinates = [x for y in query + ref for x in y[:2]]
+	
+	sort_index = sorted(range(len(all_coordinates)), key = lambda x: all_coordinates[x])
+	
+	allgroups = []
+	
+	number_curr_seq = 0
+	number_ref_seq = 0
+	
+	for index in sort_index:
+		
+		coordinate = all_coordinates[index]
+		
+		if index %2 == 0 :
+			if index < nquery:
+				number_curr_seq += 1
+			else:
+				number_ref_seq += 1
+				
+			if (number_curr_seq == 1 or number_ref_seq == 1) and number_curr_seq>0 and number_ref_seq>0:
+				allgroups.append([coordinate,coordinate])
+				
+		else:
+			if index < nquery:
+				number_curr_seq -= 1
+			else:
+				number_ref_seq -= 1
+				
+			if number_curr_seq == 0 or number_ref_seq == 0:
+				allgroups[-1][1] = coordinate
+				
+				
+	return allgroups
+
+def overlapvalid(regions, graphinfo, validregions):
+	
+	seq_index = 1
+	newregions = cl.defaultdict(list)
+	
+	def interval_len(a, b):
+		if a is None or b is None:
+			return 0
+		if b < a:
+			a, b = b, a
+		return max(0, b - a)
+	
+	for locus, regs in regions.items():
+		for region in regs:
+			localstart, localend = region[3], region[4]
+			
+			graphcoordi = qposi_togposi(graphinfo[locus], [localstart, localend - 1])
+			
+			graphspans = cl.defaultdict(list)
+			for i in range(len(graphcoordi) // 2):
+				path0, start0 = graphcoordi[2 * i][:2]
+				path1, end1   = graphcoordi[2 * i + 1][:2]
+				if path0 != path1:
+					# If this happens, we can still store both, but usually it shouldn’t.
+					pass
+				graphspans[path0].append(sorted([start0, end1]))
+				
+			totalvalidoverlap = 0
+			for path, pathregions in graphspans.items():
+				if path not in validregions:
+					continue
+				overlaps = Overlap2(pathregions, validregions[path])  # returns list of [start,end]
+				totalvalidoverlap += sum(interval_len(a, b) for a, b in overlaps)
+				
+			if totalvalidoverlap > min(1000, 0.5 * (localend - localstart)):
+				newregions[locus].append([f"seq_{seq_index}", locus, localstart, localend, "", ""])
+				seq_index += 1
+				
+	return newregions
+
+def readscafs(assemfile):
 	assemsizes = cl.defaultdict(lambda: 10000000000)
 	if len(assemfile):
 		with open(assemfile, mode = 'r') as f:
 			for line in f:
-				path = line.split()[-1]
+				fields = line.split()
+				if len(fields) < 2:
+					continue
+				# Query tables are SAMPLE, FASTA, optional YES/NO.  The old
+				# implementation used the final column, which breaks as soon as
+				# the whitelist annotation is present.
+				path = fields[1]
 				with open(path+".fai", mode = 'r') as f:
 					for line in f:
 						line = line.split()
 						assemsizes[line[0]] = int(line[1])
-				
+						
+	return assemsizes
+
+
+
+def findbreaks(inputfile, assemsizes, outputfile, refprefix):
+	
 	ifexons = set()
 	names = []
 	contigs = cl.defaultdict(list)
@@ -181,15 +596,15 @@ def findbreaks(inputfile, assemfile, outputfile):
 		
 		strd = '+' if strd[1] > strd[0] else '-'
 		
-		regions_sort = sorted(regions) if contig[-1] == '+' else sorted(regions, reverse = 1)
+		regions_sort = sorted(regions) if strd == '+' else sorted(regions, reverse = 1)
 		
 		lastend = regions_sort[0]
 		lastregion = regions_sort[0]
 		new_regions = [[regions_sort[0]]]
 		
-		allsize += abs(regions_sort[0][1]-regions_sort[0][1])
+		allsize += abs(regions_sort[0][1]-regions_sort[0][0])
 		for region in regions_sort[1:]:
-			if max(region[0],region[1], lastend[0],lastend[1]) - min(region[0],region[1], lastend[0],lastend[1]) - abs(region[1]-region[0] ) - abs(lastend[1] - lastend[0]) < cutoffdistance:
+			if max(region[0],region[1], lastend[0],lastend[1]) - min(region[0],region[1], lastend[0],lastend[1]) - abs(region[1]-region[0] ) - abs(lastend[1] - lastend[0]) < 2*cutoffdistance:
 				
 				new_regions[-1].append(region)
 			else:
@@ -201,25 +616,35 @@ def findbreaks(inputfile, assemfile, outputfile):
 		new_contigs.update({(contig+strd,i):regions for i,regions in enumerate(new_regions)})
 		
 		
-	blacklist = set()
+	haplocount = cl.defaultdict(int)
+	reflist = []
 	with open(outputfile, mode = 'w') as w:
-		index = 1
-		for (scarf, index), regions in new_contigs.items():
-			locus = "{}".format(scarf[:-1])
+		lindex = 1
+		for (contig, index), regions in new_contigs.items():
+			haplo = resolve_haplotype(contig[:-1], _query_haplopaths, ";".join(region[-1] for region in regions))
+				
+			haplocount[haplo] += 1
+			lname = f"{haplo}_{haplocount[haplo]}"
+			
+			locus = "{}".format(contig[:-1])
 			start = min(regions[0][0],regions[0][1],regions[-1][0],regions[-1][1])
 			end = max(regions[0][0],regions[0][1],regions[-1][0],regions[-1][1])
 			names = ";".join([region[-1] for region in regions])
 			
 			start = max(0,start-cutoffdistance)
-			end = min(end+cutoffdistance, assemsizes[scarf[-1]])
-			if start == 0 or end == assemsizes[scarf[:-1]]:
-				blacklist.add(f"loci_{index}")
+			end = min(end+cutoffdistance, assemsizes[locus])
+			
+			if haplo == _reference_sample or (not _reference_sample and locus.startswith(refprefix)):
+				reflist.append(lname)
 				
-			w.write("{}\t{}\t{}\t{}\t{}\n".format(locus,scarf[-1],start,end,names))
+			w.write("{}\t{}\t{}\t{}\t{}\t{}\n".format(lname, locus,contig[-1],start,end,names))
 			
-			index += 1
+			lindex += 1
 			
-	return blacklist
+	return reflist
+
+
+
 
 def polishranges(ranges):
 	
@@ -292,7 +717,7 @@ def Overlap(allaligns, allow_gap = 300):
 					
 					allgroups.append(current_group)
 					
-					current_group = [coordinate,coordinate]					
+					current_group = [coordinate,coordinate] 
 		else:
 			number_curr_seq -= 1
 			current_group[1] = coordinate
@@ -537,7 +962,6 @@ def readgraph(graphfile):
 				continue
 			
 			name, path, cigar, rposis, qposis = line 
-			
 			graphinfo[name],contigspan[name]  = getspan_ongraph(name, path, cigar, rposis, qposis)
 			
 			
@@ -545,7 +969,7 @@ def readgraph(graphfile):
 
 
 
-def readcontigsinfo(inputfile, breakfile, refprefix = "NC_0609"):
+def readcontigsinfo(inputfile, breakfile, assemsizes, refprefix = "NC_0609"):
 	
 	genetoscaff = dict()
 	with open(inputfile, mode = 'r') as f:
@@ -563,7 +987,7 @@ def readcontigsinfo(inputfile, breakfile, refprefix = "NC_0609"):
 				start, end = max(0, start),  end
 				genetoscaff[name] = [contig, strd, start, end, line[2], line[3]]
 				
-				
+	blacklist = set()
 	locuslocations = dict()
 	genetolocus = cl.defaultdict(list)
 	with open(breakfile, mode = 'r') as f:
@@ -574,32 +998,37 @@ def readcontigsinfo(inputfile, breakfile, refprefix = "NC_0609"):
 		lastcontig = ""
 		lastgenes = set()
 		index = 0
-		for index, line in enumerate(f):
-			
+		for lindex, line in enumerate(f):
+			if line.startswith(">") == False:
+				if (line.count('N')+line.count('n')>100) and locusname.startswith("Ref_") == False:
+					blacklist.add(locusname)
+				continue
 			index += 1
 			
 			line = line.strip().split()
 			
-			locusname = f"loci_{index}" 
-			contig, strd, start, end = line[0], line[1], int(line[2]), int(line[3])
-			
-			if start > lastend or contig != lastcontig:
+			#locusname, contig, strd, start, end = line[0], line[1], line[2],int(line[3]), int(line[4])
+			locusname, coordi, names = line[0][1:], line[1], line[-1]
+			contig, (start, end), strd = coordi.split(":")[0], map(int,coordi[:-1].split(":")[1].split("-")),  coordi[-1]
+			if contig != lastcontig or max(lastend,laststart,end,start) - min(lastend,laststart,end,start) > lastend - laststart + end - start:
 				scarf_index += 1
 				
 			lastcontig = contig
 			lastend = end
-			
+			laststart = start
 			names = line[-1].split(";")
 			
-			lastgenes = set(names)
+			#names = [x for x, xcoordi in genetoscaff.items() if xcoordi[0] == contig and max(xcoordi[3] ,xcoordi[2] ,end,start) - min(xcoordi[3] ,xcoordi[2],end,start) < xcoordi[3] - xcoordi[2] + end - start ]
 			
 			if len(names) == 1:
 				pass 
 				
 			if refprefix in contig:
 				locusname = "Ref_"+locusname
+			elif start <= 1 or end >= assemsizes[contig]-1:
+				blacklist.add(locusname)
 				
-			locuslocations[locusname ] = [contig+"_"+str(scarf_index), strd, start, end]
+			locuslocations[locusname ] = [contig+"_"+str(index), strd, start, end]
 			
 			for name in names:
 				if strd == '+':
@@ -612,12 +1041,12 @@ def readcontigsinfo(inputfile, breakfile, refprefix = "NC_0609"):
 					
 				genetolocus[name].append([locusname, qstart, qend] )
 				
-				genetoscaff[name][0] = contig+"_"+str(scarf_index)
+				genetoscaff[name][0] = contig+"_"+str(index)
 				
-			genetoscaff[locusname] = [contig+"_"+str(scarf_index), strd, start, end]
+			genetoscaff[locusname] = [contig+"_"+str(index), strd, start, end]
 			
 			
-	return genetoscaff, genetolocus, locuslocations
+	return genetoscaff, genetolocus, locuslocations, blacklist
 
 def combinebreaks_eachpath(names, breaks):
 	
@@ -817,6 +1246,10 @@ class graphDB:
 		},
 		"validregions": self.validregions,
 		}
+		global mergesmall
+		if mergesmall != 20000:
+			data["mergesmall"] = str(mergesmall)
+			
 		with open(path, "w") as f:
 			json.dump(data, f)
 			
@@ -842,10 +1275,14 @@ class graphDB:
 		for k, v in data["chunkindex_togene"].items()
 		})
 		obj.genechunks_index = cl.defaultdict(list, {
-		tuple(map(int, k.split(","))): v for k, v in data["genechunks_index"].items()
+		tuple(map(int, k.split(","))) if len(k) else k: v for k, v in data["genechunks_index"].items()
 		})
 		obj.validregions = cl.defaultdict(list, data.get("validregions", {}))
 		
+		if "mergesmall" in data:
+			global mergesmall
+			mergesmall = int(data['mergesmall'])
+			
 		return obj
 	
 	def load_breaks(self, break_uniformed):
@@ -966,8 +1403,7 @@ class graphDB:
 							lastqposi[breakindex] = [qposi, lastqposi[breakindex][1]]
 							
 							
-			chunks = sorted([x for x in allchunks if x[2] - x[1] > 100], key = lambda x: x[3])
-			
+			chunks = sorted([x for x in allchunks if x[2] - x[1] > 300], key = lambda x: x[3])
 			return chunks
 		
 		self.genechunks = cl.defaultdict(list)
@@ -983,7 +1419,7 @@ class graphDB:
 				
 				chunks = cutspan_bybreaks(gene, self.breaks)
 				
-				chunks = [x for x in chunks if abs(x[2] - x[1]) > 100]
+				chunks = [x for x in chunks if abs(x[2] - x[1]) > 300]
 				
 				chunks_new = self.overlap_chunks( chunks)
 				
@@ -999,6 +1435,7 @@ class graphDB:
 		self.genes = list(self.genechunks_index.keys())
 		self.genenum = len(self.genechunks_index)
 		
+		
 		return self
 	
 	def getchunks_fromspan(self, spans, cigarstr):
@@ -1012,23 +1449,21 @@ class graphDB:
 		path_spans = []
 		
 		for (path, grange, qrange), cigar in zip(spans,cigars):
-			
 			path_spans.append([grange, qrange, path[1:], path[0], cigar])
 			
+	
 		pathsizes = dict()
 		for grange, qrange, path, strd, cigar in path_spans:
 			
-			qstart = min(qrange)
+			qstart,qend = min(qrange),max(qrange)
 			
 			breaks_onpath = self.breaks[path]
-			
-			pathsize = int(path.split('_')[3]) - int(path.split('_')[2])
+			pathsize = int(path.split('_')[-1]) - int(path.split('_')[-2])
 			
 			#allgcoordis = [self.break_uniformed.get((path, x),x) for y in spans_onpath for x in y[0]]
-			allbreaks = [x for x in breaks_onpath if x >= grange[0] and x < grange[1]]
+			allbreaks = [x for x in breaks_onpath if x >= grange[0] and x < grange[1]]			
 			
 			allgcoordis = [grange[0]] + allbreaks + [grange[1]]
-			
 			if strd == "<":
 				breaks_qposi = gposi_toqposi(cigar, [pathsize - x for x in allgcoordis][::-1])
 				breaks_qposi = breaks_qposi[::-1]
@@ -1037,17 +1472,15 @@ class graphDB:
 				
 			breaks_qposi = [x + qstart for x in breaks_qposi]
 			
-			
 			lastgposi, lastqposi = allgcoordis[0], breaks_qposi[0]
 			for gposi, qposi in zip(allgcoordis[1:], breaks_qposi[1:]):
 				
-				if abs(qposi - lastqposi)>1000:
+				if abs(qposi - lastqposi)>200:
 					allchunks.append([path,lastgposi, gposi, lastqposi, qposi])
 				lastgposi, lastqposi =  gposi,qposi
 				
 				
-		allchunks = sorted([[x[0]]+sorted(x[1:3])+sorted(x[3:]) for x in allchunks if abs(x[2] - x[1]) > 100], key = lambda x: x[3]+x[4])
-		
+		allchunks = sorted([[x[0]]+sorted(x[1:3])+sorted(x[3:]) for x in allchunks if abs(x[2] - x[1])+abs(x[4]-x[3]) > 300], key = lambda x: x[3]+x[4])
 		allchunks_index = self.overlap_chunks(allchunks)
 		
 		return allchunks_index
@@ -1081,6 +1514,7 @@ class graphDB:
 					chunk[0] = newindex
 					
 		novels = []
+		"""
 		novel = []
 		lastqend = -1000000
 		for i,x in enumerate(allchunks):
@@ -1096,8 +1530,8 @@ class graphDB:
 				
 		if len(novel):
 			novels.append(novel)
-			
 		novels = [x for y in novels for x in polishranges(y) if len(x)]
+		"""
 		
 		for result in results:
 			chunks_new = tuple([index_tochunkindex.get(x,y) for x,y in zip(result[0],result[1])])
@@ -1137,216 +1571,216 @@ class graphDB:
 		
 		
 	def overlap_genes(self, spans, cigarstr, ifupdate = 0):
+		"""Match query chunks to reference paths with polynomial dynamic programming.
 
-		def determinegenes(allchunks,passed_genes):
-			
-			passed_genes = sorted([x for x in passed_genes if len(x[2])], key = lambda x: max( [  y[2] for y in x[2] ] ), reverse =1 )
-			
-			
+		The legacy implementation cloned a complete candidate for both the
+		"skip" and "extend" choices.  Repeated traversals of one graph path
+		therefore generated exponentially many histories.  For a fixed first and
+		last query chunk, reference path, and path position, only the
+		highest-scoring history can affect any future transition or final greedy
+		selection.  The dictionary frontier below applies that dominance rule.
+		"""
+
+		def keep_best_active(states, state):
+			key = state.active_key()
+			old = states.get(key)
+			if old is None or state.score > old.score:
+				states[key] = state
+
+		def determinegenes(allchunks, passed_genes):
 			selected_genes = []
 			exclude = set()
-			for gene in passed_genes:
-				
-				chunk_usedindex = list(range(min(gene[0]),max(gene[0])+1))
-				
-				
-				if exclude & set(chunk_usedindex):
+			for gene in passed_genes.iter_sorted():
+				chunk_usedindex = range(gene[0][0], gene[0][-1] + 1)
+				if any(x in exclude for x in chunk_usedindex):
 					continue
-				
 				selected_genes.append(gene)
-				
-				if len(gene[0]):
-					exclude.update(chunk_usedindex)
-					
+				exclude.update(chunk_usedindex)
+
 			for ichunk, chunk in enumerate(allchunks):
-				
 				chunkindex = chunk[0]
 				qstart,qend = chunk[4],chunk[5]
-				
-				if chunkindex  >= 0 and ichunk not in exclude:
-					
-					gene = [[ichunk], [chunkindex], [], qstart, qend , [ [qstart, qend]]]
-					selected_genes.append(gene)
-					
-			return selected_genes,exclude
-		
-		def extendgenes(current_genes, passed_genes, ichunk, chunkindex, qstart, qend, ifupdate = 1):
-			
-			current_genes = sorted(current_genes, key = lambda x: len(x[1]), reverse =1 )
-			
-			continued_genes = []
-			
-			mingap = 1000000000
-			ifmatch = 0
-			for index,gene in enumerate(current_genes):
-				
-				insersize = qstart - gene[4]
-				
-				if insersize > 30000:
-					passed_genes.append(gene)
-					continue
-				
-				involves = gene[2]
-				
-				involves_new = []
-				for (involvegene, aligns, score) in involves:
-					
-					alignindex = aligns[-1]
-					
-					if chunkindex in involvegene[(alignindex+1):]:
-						
-						newindex = alignindex+1 +involvegene[(alignindex+1):].index(chunkindex)
-						
-						delsize = sum([self.blocksize[involvegene[x]] for x in range(alignindex+1, newindex)])
-						
-						newscore = qend - qstart - 2*insersize - 2*delsize
-						
-						score += newscore
-						
-						mingap = min(mingap, insersize+delsize)
-						
-						if delsize < 30000 and newscore >= 0:
-							involves_new.append((involvegene, aligns+[newindex], score))
-							
-				if len(involves_new):
-					
-					if not ifupdate:
-						gene_old = [x if type(x) != type([]) else [y for y in x] for x in gene]
-						continued_genes.append(gene_old)
-						
-					gene[0].append(ichunk)
-					gene[1].append(chunkindex)
-					gene[2] = involves_new
-					gene[4] = qend
-					gene[5].append([qstart, qend])
-					continued_genes.append(gene)
-					
-				elif len(gene[0]) >0:
-					
-					if ifupdate:
-						continued_genes.append(gene)
-					else:
-						passed_genes.append(gene)
-						
-						
-			return continued_genes, mingap
-		
-		current_genes = cl.defaultdict(list)
-		passed_genes = []
-		allchunks = self.getchunks_fromspan(spans, cigarstr)
-		allchunks = sorted(allchunks, key = lambda x: x[4] + x[5])
-		
-		lastchunk = -100000
+				if chunkindex >= 0 and ichunk not in exclude:
+					selected_genes.append([
+						[ichunk], [chunkindex], [], qstart, qend,
+						[[qstart, qend]],
+					])
+			return selected_genes, exclude
+
+		# Lazily build O(1)/O(log n) transition data for each reference path.
+		# This replaces tuple.index() and a repeated deletion-size summation in
+		# every active candidate.
+		gene_transition_cache = {}
+
+		def transition_data(gene):
+			cached = gene_transition_cache.get(gene)
+			if cached is not None:
+				return cached
+			positions = cl.defaultdict(list)
+			prefix_sizes = [0]
+			for position, graph_chunk in enumerate(gene):
+				positions[graph_chunk].append(position)
+				prefix_sizes.append(
+					prefix_sizes[-1] + self.blocksize[graph_chunk]
+				)
+			cached = (positions, prefix_sizes)
+			gene_transition_cache[gene] = cached
+			return cached
+
+		current_genes = {}
+		passed_genes = _BestIntervalStates()
+		allchunks = sorted(
+			self.getchunks_fromspan(spans, cigarstr),
+			key=lambda x: x[4] + x[5],
+		)
+
 		for ichunk, chunk in enumerate(allchunks):
-			
 			chunkindex = chunk[0]
 			qstart,qend = chunk[4],chunk[5]
-			
-			allinvolve_genes = self.chunkindex_togene.get(chunkindex,[])
-			
-			if len(allinvolve_genes) == 0 and len(current_genes) == 0:
+			allinvolve_genes = self.chunkindex_togene.get(chunkindex, ())
+			if not allinvolve_genes and not current_genes:
 				continue
-			
-			continued_genes, mingap = extendgenes(current_genes, passed_genes, ichunk, chunkindex, qstart, qend, ifupdate)
-			
+
+			continued_genes = {}
+			# Longer matches were processed first by the legacy code.  Preserve
+			# that order solely as a deterministic tie breaker.
+			active = sorted(
+				current_genes.values(), key=lambda state: state.depth, reverse=True,
+			)
+			for state in active:
+				insersize = qstart - state.qend
+				if insersize > 30000:
+					passed_genes.add(state)
+					continue
+
+				positions, prefix_sizes = transition_data(state.gene)
+				matching_positions = positions.get(chunkindex, ())
+				position_index = bisect.bisect_right(
+					matching_positions, state.alignindex,
+				)
+				matched = False
+				if position_index < len(matching_positions):
+					newindex = matching_positions[position_index]
+					delsize = (
+						prefix_sizes[newindex]
+						- prefix_sizes[state.alignindex + 1]
+					)
+					newscore = (
+						qend - qstart - 2 * insersize - 2 * delsize
+					)
+					if delsize < 30000 and newscore >= 0:
+						matched = True
+						child = _DPOverlapState(
+							state, ichunk, chunkindex, state.gene,
+							newindex, state.score + newscore, qstart, qend,
+						)
+						keep_best_active(continued_genes, child)
+
+				if matched:
+					if not ifupdate:
+						keep_best_active(continued_genes, state)
+				elif ifupdate:
+					keep_best_active(continued_genes, state)
+				else:
+					passed_genes.add(state)
+
+			for gene, alignindex in allinvolve_genes:
+				root = _DPOverlapState(
+					None, ichunk, chunkindex, gene, alignindex,
+					qend - qstart, qstart, qend,
+				)
+				keep_best_active(continued_genes, root)
 			current_genes = continued_genes
-			
-			new_gene = [[ichunk], [chunkindex], [], qstart, qend , [ [qstart, qend]]]
-			
-			allinvolve_genes = self.chunkindex_togene.get(chunkindex,[])
-			for (gene,alignindex) in allinvolve_genes:
-				
-				new_gene[2].append((gene,[alignindex],qend - qstart))
-				
-			current_genes.append(new_gene)
-			
-		passed_genes.extend(current_genes)
-		
-		results, used_chunks = determinegenes(allchunks,passed_genes)
-		
+
+		passed_genes.extend(current_genes.values())
+		results, used_chunks = determinegenes(allchunks, passed_genes)
+	
+	
 		for result in results:
 			result[2] = [(x[2],self.genechunks_index.get(x[0], [""])[0]) for x in result[2]]
 			if len(result[2]):
 				result[2] = result[2][0]
 				
 		results = sorted(results, key = lambda x: tuple(x[0]))
-		
-		return results 
-		
-		
+	
+		if ifupdate:
+			self.update_database(allchunks, used_chunks, results)
+			
+			
+		return results	
+	
 	
 def getblocks(gbreaks, break_uniformed, contigspans, genetoscaff, graphinfo, blacklists):
 	
 	saveorload = 0
-	
-	allloci = [x for x in gbreaks.keys() if x.startswith("Ref_")] + [x for x in gbreaks.keys() if not x.startswith("Ref_")]
+	allloci_wlist = [x for x in gbreaks.keys() if x.startswith("Ref_")] + [x for x in gbreaks.keys() if not x.startswith("Ref_") if x not in blacklists]  
+	allloci_blist = [x for x in gbreaks.keys() if not x.startswith("Ref_") if x in blacklists]
 	if saveorload == 0:
-	
+		
 		thegraph = graphDB()
 		thegraph.load_breaks(break_uniformed)
-	
+		
 		refgenes = []
 		for name, gbreak in gbreaks.items():
 			
 			if name.startswith("Ref_"):
-					
+				
 				thegraph.load_refbreaks([(x[0],x[1]) for y in gbreak for x in y])
-					
 				refgenes.append([gbreaks[name], contigspans[name], graphinfo[name]])
-					
+				
 		thegraph.load_refchunks().load_refgenes(refgenes)
-	
+
+		counter = 0
 		results = dict()
-		for loci in allloci:
-			x = 1 if loci not in blacklists else 0
-			results[loci] = thegraph.overlap_genes(contigspans[loci], graphinfo[loci], ifupdate=x)
+		for loci in allloci_wlist:
+			results[loci] = thegraph.overlap_genes(contigspans[loci], graphinfo[loci], ifupdate=1)
+		for loci in allloci_wlist:
+			results[loci] = thegraph.overlap_genes(contigspans[loci], graphinfo[loci], ifupdate=0)
 			
-			
-		for loci in allloci:
-			results[loci] = thegraph.overlap_genes(contigspans[loci], graphinfo[loci])
-	
+		for loci in allloci_blist:
+			results[loci] = thegraph.overlap_genes(contigspans[loci], graphinfo[loci], ifupdate=1)
+		for loci in allloci_blist:
+			results[loci] = thegraph.overlap_genes(contigspans[loci], graphinfo[loci], ifupdate=0)
+		
 	"""
 	if saveorload == 1:
 		thegraph = graphDB()
 		thegraph = thegraph.load_json(cache)
-	
+
 		results = dict()
 		for loci in allloci:
 			results[loci] = thegraph.overlap_genes(contigspans[loci], graphinfo[loci])
 	"""
-	
+			
 	return results,thegraph
-
 
 def breaks_ongraph(genetoscaff, genetolocus, graphinfo, contigspan, blacklists):
 	
 	gbreaks = cl.defaultdict(list)
-
 	segmentinfo =  cl.defaultdict(list)
 	for name, infos in genetolocus.items():
 		
 		for info in infos:
 			
 			locus,start,end = info
-		
+			
 			if locus.startswith("Ref_"):
 				graphinfo[locus] = graphinfo[locus[4:]]
-			
 				if locus[4:] in contigspan:
 					contigspan[locus] = contigspan[locus[4:]]
 					del contigspan[locus[4:]]
-						
+					
 			if locus not in graphinfo:
 				continue
-		
+			
 			coordinates = qposi_togposi(graphinfo[locus], [start,end-1])
-		
+			
 			gbreaks[locus].append([list(x)+[name] for x in coordinates])
-		
+			
 			segmentinfo[locus].append([coordinates[0],coordinates[1], name])
-				
+			
 	gbreaks = {locus:sorted(regions, key = lambda x: x[0][2]) for locus, regions in gbreaks.items() }
-
+	
 	breaks_andspans = cl.defaultdict(list)
 	for name, data in gbreaks.items():
 		breaks_andspans[name] = [x for x in data]
@@ -1354,13 +1788,13 @@ def breaks_ongraph(genetoscaff, genetolocus, graphinfo, contigspan, blacklists):
 		breaks_andspans[name].append([[x[0][1:],x[1][y],x[2][y],x[0][0],""] for x in data for y in [0, 1]])
 		
 	break_uniformed = combinebreaks(breaks_andspans)
-
 	results,thegraph = getblocks(gbreaks, break_uniformed, contigspan, genetoscaff, graphinfo, blacklists)
-
+	
 	return results,thegraph
 
-def assemblysmall(allresults, cutoff = 20000):
+def assemblysmall(allresults,  cutoff = 20000):
 	
+	allowdistance = 20000
 	def ifalign(thelist,x):
 		
 		l = len(x)
@@ -1382,49 +1816,76 @@ def assemblysmall(allresults, cutoff = 20000):
 			size = result[4] - result[3]
 			
 			if size < cutoff:
-				iffix.add(loci)
-				smallchunks.add(tuple(sorted(result[1])))
 				
-				if i == 0:
-					
+				distance1 = abs(result[3] - results[i-1][4]) if i > 0 else 2000000
+				distance2 = abs(result[4] - results[i+1][3]) if i != len(results)-1 else 2000000
+				
+				if distance1 > allowdistance and distance2 > allowdistance:
+					continue
+				elif distance1 > allowdistance:
+					iffix.add(loci)
+					smallchunks.add(tuple(sorted(result[1])))
 					bindindex2 = tuple(sorted([result[1][-1], results[i+1][1][0]]))
 					bindrecords[bindindex2] += 1
 					continue
-				elif i == len(results)-1:
+				
+				elif distance2 > allowdistance:
+					iffix.add(loci)
+					smallchunks.add(tuple(sorted(result[1])))
 					bindindex1 = tuple(sorted([result[1][0], results[i-1][1][-1]]))
-					
 					bindrecords[bindindex1] += 1
 					continue
 				else:
+					iffix.add(loci)
+					smallchunks.add(tuple(sorted(result[1])))
 					bindindex1 = tuple(sorted([result[1][0], results[i-1][1][-1]]))
 					bindindex2 = tuple(sorted([result[1][-1], results[i+1][1][0]]))
-					if abs(results[i+1][4] - results[i+1][3]) >= abs(results[i-1][4] - results[i-1][3]):
+					
+					if abs(results[i+1][4] - results[i][3]) >= abs(results[i-1][3] - results[i][4]):
 						bindrecords[bindindex2] += 1
 					else:
 						bindrecords[bindindex1] += 1
 						
+						
 	for loci,results in allresults.items() :
+		
 		if loci not in iffix:
 			continue
+		
 		connects = [0 for x in results]
 		
 		for i,result in enumerate(results):
 			
 			if tuple(sorted(result[1])) in smallchunks:
 				
-				if i == 0:
+				distance1 = abs(result[3] - results[i-1][4]) if i > 0 else 2000000
+				distance2 = abs(result[4] - results[i+1][3]) if i != len(results)-1 else 2000000
+				
+				if distance1 > allowdistance and distance2 > allowdistance:
+					continue
+				elif distance1 > allowdistance:
 					connects[i] = 1
 					continue
-				elif i == len(results)-1:
+				elif distance2 > allowdistance:
 					connects[i-1] = 1
 					continue
 				else:
-					bindindex1 = tuple(sorted([result[1][0], results[i-1][1][-1]]))
-					bindindex2 = tuple(sorted([result[1][-1], results[i+1][1][0]]))
-					if bindrecords[bindindex2] > bindrecords[bindindex1]:
+					
+					distance1 = abs(result[3] - results[i-1][4])
+					distance2 = abs(result[4] - results[i+1][3])
+					
+						
+					if distance1 > allowdistance:
 						connects[i] = 1
-					else:
+					elif distance2 > allowdistance:
 						connects[i-1] = 1
+					else:
+						bindindex1 = tuple(sorted([result[1][0], results[i-1][1][-1]]))
+						bindindex2 = tuple(sorted([result[1][-1], results[i+1][1][0]]))
+						if bindrecords[bindindex2] > bindrecords[bindindex1]:
+							connects[i] = 1
+						else:
+							connects[i-1] = 1
 						
 		lastindex = 0
 		newresults = [results[0]]
@@ -1447,6 +1908,9 @@ def assemblysmall(allresults, cutoff = 20000):
 		
 	for loci,results in allresults.items() :
 		
+		if len(results) == 0:
+			continue
+		
 		laststart, lastend  = results[0][3], results[0][4]
 		for i,result in enumerate(results[1:]):
 			
@@ -1463,9 +1927,10 @@ def assemblysmall(allresults, cutoff = 20000):
 			
 	return allresults, iffix
 
+
 def clean_nonoverlap(breaksoncontigs, locuslocations, geneoncontigs):
-	
 	genelabs = cl.defaultdict(lambda: [0,[]])
+	alloldsegments = cl.defaultdict(list)
 	for loci, breaks in breaksoncontigs.items():
 		
 		scaflocus = locuslocations[loci]
@@ -1484,7 +1949,7 @@ def clean_nonoverlap(breaksoncontigs, locuslocations, geneoncontigs):
 					
 				lastend = max(end,lastend)
 				
-		oldsegments = geneoncontigs[scaflocus[0]]
+		alloldsegments[loci] = geneoncontigs[scaflocus[0]]
 		
 		for segment in breaks:
 			
@@ -1501,7 +1966,7 @@ def clean_nonoverlap(breaksoncontigs, locuslocations, geneoncontigs):
 					scafstart = scaflocus[3] - end
 					scafend = scaflocus[3] - start
 					
-				overlap = sorted([( (x[1] - x[0]) + (scafend - scafstart) - max(x[1],scafend,x[0],scafstart) + min(x[1],scafend,x[0],scafstart), x) for i,x in enumerate(oldsegments)], reverse=1)[0]   
+				overlap = sorted([( (x[1] - x[0]) + (scafend - scafstart) - max(x[1],scafend,x[0],scafstart) + min(x[1],scafend,x[0],scafstart), x) for i,x in enumerate(alloldsegments[loci])], reverse=1)[0]   
 				
 				if overlap[0] > genelabs[segmentindex][0]:
 					genelabs[segmentindex] = overlap
@@ -1548,32 +2013,45 @@ def clean_nonoverlap(breaksoncontigs, locuslocations, geneoncontigs):
 			
 		breaksoncontigs[loci] = newsegments
 		
-	return breaksoncontigs, oldsegments, genelabs
+	return breaksoncontigs, alloldsegments, genelabs
 
 
 def annotate_regions(breaksoncontigs, locuslocations, genetoscaff):
 	
+	groupprefix = _group_prefix or "PATs"
 	geneoncontigs = cl.defaultdict(list)
 	for genename, info in genetoscaff.items():
 		
 		if len(info) > 4:
 			geneoncontigs[info[0]].append(info[2:]+[genename])
 			
-			groupprefix = genename.split('_')[0]
+			if not _group_prefix:
+				groupprefix = genename.split('_')[0]
 			
 	novel_overlap = [x[2][1]  for loci, breaks in breaksoncontigs.items() for x in breaks if len(x[2]) ]
 	novel_overlap = list(set(novel_overlap))
-	
-	breaksoncontigs, oldsegments, genelabs = clean_nonoverlap(breaksoncontigs, locuslocations, geneoncontigs)
+	breaksoncontigs, alloldsegments, genelabs = clean_nonoverlap(breaksoncontigs, locuslocations, geneoncontigs)
 	
 	breaksoncontigs = {k:v for k,v in breaksoncontigs.items() if len(v)}
 	
-	
+	breaksoncontigs_ori = copy.deepcopy(breaksoncontigs)
+
+	maxsize = max([max([y[4]-y[3] for y in x]+[0]) for x in breaksoncontigs.values()]+[0])
+	global mergesmall
 	iffix = 1
 	while iffix:
-		breaksoncontigs, iffix = assemblysmall(breaksoncontigs)
+		breaksoncontigs, iffix = assemblysmall(breaksoncontigs, mergesmall)
 		
+	maxsize = max([max([y[4]-y[3] for y in x]+[0]) for x in breaksoncontigs.values()]+[0])
+	if maxsize > 100000:
+		mergesmall = mergesmall//2
+		breaksoncontigs = breaksoncontigs_ori
 		
+		maxsize = max([max([y[4]-y[3] for y in x]+[0]) for x in breaksoncontigs_ori.values()]+[0])
+		iffix = 1
+		while iffix:
+			breaksoncontigs, iffix = assemblysmall(breaksoncontigs, mergesmall)
+			
 	regions = []
 	for loci, breaks in breaksoncontigs.items():
 		
@@ -1590,7 +2068,7 @@ def annotate_regions(breaksoncontigs, locuslocations, genetoscaff):
 				scafstart = scaflocus[3] - end
 				scafend = scaflocus[3] - start
 				
-			overlap = sorted([( (x[1] - x[0]) + (scafend - scafstart) - max(x[1],scafend,x[0],scafstart) + min(x[1],scafend,x[0],scafstart), x) for i,x in enumerate(oldsegments)], reverse=1)[0]   
+			overlap = sorted([( (x[1] - x[0]) + (scafend - scafstart) - max(x[1],scafend,x[0],scafstart) + min(x[1],scafend,x[0],scafstart), x) for i,x in enumerate(alloldsegments[loci])], reverse=1)[0]   
 			
 			regions.append([scaflocus[0], int(scafstart), int(scafend)] + overlap[1][2:]+[loci,start,end])
 			
@@ -1601,7 +2079,7 @@ def annotate_regions(breaksoncontigs, locuslocations, genetoscaff):
 		
 		contig, start, end, ifexon, mapinfo,oldname,locus,localstart,localend = region
 		
-		haplo = "_h".join(contig.split("#")[:2]) if "#" in contig else "CHM13_h1" if "NC_0609" in contig else "HG38_h1"
+		haplo = resolve_haplotype(contig, _query_haplopaths, oldname)
 		
 		haplo_counter[haplo] += 1
 		
@@ -1609,11 +2087,16 @@ def annotate_regions(breaksoncontigs, locuslocations, genetoscaff):
 		
 		#header = "{}\t{}:{}-{}\t{}\t{}".format(newname, contig, start, end, ifexon, mapinfo  )
 		
-		new_regions[contig].append([newname,  contig, start, end, ifexon, mapinfo])
+		fasta_contig = resolve_fasta_contig(contig, haplo)
+		new_regions[fasta_contig].append(
+			[newname, fasta_contig, start, end, ifexon, mapinfo]
+		)
 		
 		orginal_loci[newname] = (locus,localstart,localend)
 		
-	new_regions = [x[:1]+["_".join(x[1].split("_")[:-1])]+x[2:] for y in new_regions.values() for x in y]
+	# Internal graph loci use an appended ``_N`` key.  The records above retain
+	# only contig names verified against the selected sample's FASTA index.
+	new_regions = [x for values in new_regions.values() for x in values]
 	
 	return new_regions, orginal_loci
 
@@ -1621,7 +2104,7 @@ def annotate_regions(breaksoncontigs, locuslocations, genetoscaff):
 def coordinate_uniform(cbreaks_sort):
 	
 	uniform_coordis = []
-
+	
 	currbreaks =  []
 	lastbreak = -100
 	for coordi in cbreaks_sort:
@@ -1631,7 +2114,7 @@ def coordinate_uniform(cbreaks_sort):
 			if len(currbreaks):
 				uniform = cl.Counter(currbreaks).most_common(1)[0][0]
 				uniform_coordis.extend([uniform] * 1)
-					
+				
 			currbreaks = [coordi]
 			
 		lastbreak = coordi
@@ -1651,7 +2134,7 @@ def locatebreaksoncontigs(breaksonscaf, locuslocations, genetoscaff):
 	for gene,obreaks in genetoscaff.items():
 		
 		scaf, strd, start, end = obreaks[:4]
-	
+		
 		oldbreaksoncontig[scaf].extend([start, end])
 		
 	results = cl.defaultdict(list)
@@ -1659,27 +2142,27 @@ def locatebreaksoncontigs(breaksonscaf, locuslocations, genetoscaff):
 		
 		if len(cbreaks) == 0:
 			continue
-	
+		
 		cbreaks_sort_index = sorted(range(len(cbreaks)), key = lambda x: cbreaks[x])
-	
+		
 		cbreaks_sort = sorted([cbreaks[x] for x in cbreaks_sort_index])
-	
+		
 		cbreaks_sort_uniform = coordinate_uniform(cbreaks_sort)
-	
+		
 		oldmin = min(oldbreaksoncontig[scafford]+[-100]) 
 		oldmax = max(oldbreaksoncontig[scafford]+[100000000000])
-	
+		
 		cbreaks_sort_uniform_rangeindex = [i for i,x in enumerate(cbreaks_sort_uniform) if x > oldmin + 100 and x< oldmax-100 ]
-	
+		
 		if len(cbreaks_sort_uniform_rangeindex) == 0:
 			
 			if min(cbreaks_sort_uniform_rangeindex) > 0:
 				cbreaks_sort_uniform_rangeindex = [min(cbreaks_sort_uniform_rangeindex)-1] + cbreaks_sort_uniform_rangeindex
 			if max(cbreaks_sort_uniform_rangeindex) < len(cbreaks_sort_uniform_rangeindex) - 1:
 				cbreaks_sort_uniform_rangeindex =  cbreaks_sort_uniform_rangeindex + [max(cbreaks_sort_uniform_rangeindex)+1]
-					
+				
 		cbreaks_sort_uniform = [cbreaks_sort_uniform[x] for x in cbreaks_sort_uniform_rangeindex]
-	
+		
 		if len(cbreaks_sort_uniform ) == 0:
 			cbreaks_sort_uniform = oldbreaksoncontig[scafford]
 		elif  len(cbreaks_sort_uniform ) <= 1 or oldmin < min(cbreaks_sort_uniform) - 1000 or oldmax > max(cbreaks_sort_uniform) + 1000:
@@ -1688,17 +2171,17 @@ def locatebreaksoncontigs(breaksonscaf, locuslocations, genetoscaff):
 			#cbreaks_sort_uniform = sorted(oldbreaksoncontig[scafford])
 			
 		results[scafford] = cbreaks_sort_uniform 
-			
-			
+		
+		
 	return results
 
 def MergeChunks(regions, mergedistance):
 	
 	regions_sort = sorted([x for x in regions], key = lambda x: (x[1], x[2]))
-
+	
 	lastcontig = ""
 	lastend = -mergedistance - 1
-
+	
 	merged_regions = []
 	current_region = []
 	for region in regions_sort:
@@ -1721,11 +2204,11 @@ def MergeChunks(regions, mergedistance):
 		
 	merged_regions = merged_regions[1:]
 	merged_regions.append(current_region)
-
-
+	
+	
 	if len([x for x in merged_regions if len(x)]) == 0:
 		return 0, []
-
+	
 	maxsize = max([x[3]-x[2] for x in merged_regions])
 	if maxsize < mergedistance:
 		
@@ -1733,14 +2216,11 @@ def MergeChunks(regions, mergedistance):
 		
 	return maxsize, regions
 
-def uniformbreaks(inputfile, haplomergefile, graphfile, refcontig, blacklists):
+def uniformbreaks(inputfile, haplomergefile, graphfile, assemsizes, refcontig):
 	
-	genetoscaff, genetolocus, locuslocations = readcontigsinfo(inputfile, haplomergefile, refcontig)
-
+	genetoscaff, genetolocus, locuslocations, blacklists = readcontigsinfo(inputfile, haplomergefile, assemsizes, refcontig)
 	graphinfo, contigspan = readgraph(graphfile)
-
 	results, thegraph = breaks_ongraph(genetoscaff, genetolocus, graphinfo, contigspan, blacklists)
-
 	regions, orginal_loci = annotate_regions(results,  locuslocations, genetoscaff)
 	
 	#normalized = json.dumps(sorted(regions, key=lambda x: tuple(map(str, x))), sort_keys=True)
@@ -1749,7 +2229,7 @@ def uniformbreaks(inputfile, haplomergefile, graphfile, refcontig, blacklists):
 	if cache:
 		allgraphspans = cl.defaultdict(list)
 		for region in regions:
-
+			
 			name,  contig, start, end = region[:4]
 			
 			locus,localstart,localend = orginal_loci[name]
@@ -1772,10 +2252,20 @@ def uniformbreaks(inputfile, haplomergefile, graphfile, refcontig, blacklists):
 		
 		thegraph.save_json(cache)
 		
-
+		
 	return regions
 
 def main(args):
+	
+	global mergesmall, cutoffdistance, tool_folder
+	mergesmall = args.mergesmall
+	cutoffdistance = args.anchor_size
+	tool_folder = os.path.abspath(args.tools_dir) if args.tools_dir else script_folder
+	queryfile = args.query
+	global _query_haplopaths, _contig_to_haplotypes, _group_prefix, _reference_sample
+	_query_haplopaths, _contig_to_haplotypes = load_haplopaths(queryfile)
+	_group_prefix = args.group_prefix
+	_reference_sample = next(iter(_query_haplopaths), "")
 	
 	if len(args.folder)==0: 
 		folder = args.output + "_temp"+ datetime.datetime.now().strftime("%y%m%d_%H%M%S/").replace("%","_")
@@ -1784,30 +2274,35 @@ def main(args):
 		
 	else:
 		folder = args.folder
-		os.system("mkdir {} || true".format(folder))
+		os.makedirs(folder,exist_ok=True)
 		
-	blacklists = findbreaks(args.input, args.query, args.output+"_loci.txt")
+	scafsizes = readscafs(args.query)
 	haplomergefile = args.output+"_loci.txt.fasta"
-	makenewfasta(args.output+"_loci.txt", args.query, haplomergefile, folder ,args.threads)
-	os.system(f"{script_folder}/KmerStrd -i {haplomergefile} -o {haplomergefile}_ && mv {haplomergefile}_ {haplomergefile}")
-	makegraph(haplomergefile, folder, args.threads)
-
+	ifmakegraph = 1
+	if ifmakegraph == 1:
+		reflist = findbreaks(args.input, scafsizes, args.output+"_loci.txt", args.ref)
+		makenewfasta(args.output+"_loci.txt", args.query, haplomergefile, folder ,args.threads, args.ref)
+		kmerstrd = resolve_tool("kmerstrd", "KmerStrd")
+		orientation_reference = args.target_fasta or queryfile
+		oriented = haplomergefile + "_"
+		subprocess.run(
+			[kmerstrd, "-i", haplomergefile, "-o", oriented, "-r", orientation_reference],
+			check=True,
+		)
+		os.replace(oriented, haplomergefile)
+		makegraph(haplomergefile, folder, args.threads, reflist)
 	if args.cache:
 		global cache
 		cache = haplomergefile + "_graphcache.json"
 		
-	regions = uniformbreaks(args.input, args.output+"_loci.txt", haplomergefile+"_allgraphalign.out", args.ref, blacklists)
-
+	regions = uniformbreaks(args.input, args.output+"_loci.txt.fasta", haplomergefile+"_allgraphalign.out", scafsizes, args.ref)
 	maxsize, regions = MergeChunks(regions, args.mergeall)
-
 	if len(regions) == 0:
 		print(f"gfixbreak.py Error, Missing regions: {args.input}")
-		
-		
 	makenewfasta2(regions, args.query, args.output, folder, args.threads)
 	if len(args.folder)==0:
 		os.system("rm  -rf {} || true".format(folder))
-			
+		
 	#os.system(f" cat {haplomergefile} | grep \"^>\" > {haplomergefile}_   &&  mv {haplomergefile}_ {haplomergefile} ")
 	os.system(f"rm {haplomergefile}_norm.gz || true ")
 	return
@@ -1818,15 +2313,18 @@ def run():
 	"""
 	parser = argparse.ArgumentParser(description="")
 	parser.add_argument("-i", "--input", help="path to input data file",dest="input", type=str, required=True)
-	parser.add_argument("-n", "--norm", help="path to input data file",dest="norm", type=str, required="")
 	parser.add_argument("-o", "--output", help="path to output file", dest="output",type=str, required=True)
 	parser.add_argument("-t", "--threads", help="path to output file", dest="threads",type=int, default = 1)
-	parser.add_argument("-q", "--query", help="path to output file", dest="query",type=str, default = True)
+	parser.add_argument("-q", "--query", help="path to output file", dest="query",type=str, required= True)
 	parser.add_argument("-d", "--folder", help="path to output file", dest="folder",type=str, default = "")   
 	parser.add_argument("-m", "--mergeall", help="path to output file", dest="mergeall",type=int, default = 80000)
+	parser.add_argument("-s", "--mergesmall", help="path to output file", dest="mergesmall",type=int, default = 20000)
 	parser.add_argument("-r", "--ref", help="prefix of ref contig", dest="ref",type=str, default = "NC_0609")
+	parser.add_argument("--anchor-size", help="bp extension used around merged input loci", dest="anchor_size", type=int, default=5000)
+	parser.add_argument("--group-prefix", help="stable output record prefix", dest="group_prefix", type=str, default="")
+	parser.add_argument("--tools-dir", help="directory containing compiled PATs binaries", dest="tools_dir", type=str, default="")
+	parser.add_argument("--target-fasta", help="target-group FASTA used to orient graph loci", dest="target_fasta", type=str, default="")
 	parser.add_argument("--cache", help="save caches", action="store_true")
-
 	parser.set_defaults(func=main)
 	args = parser.parse_args()
 	args.func(args)

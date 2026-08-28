@@ -17,8 +17,9 @@ typedef unsigned long long ull_atom;
 
 constexpr int klen = 31;
 constexpr countint MAXCOUNT = std::numeric_limits<countint>::max();
-//large_prime will determine the hash space and memory usage: recommend use 536870909, 1073741827, or 2147483647
-#define large_prime 0x3FFFFFFF
+// hashfunc returns every 30-bit value in [0, 0x3fffffff], so the table
+// requires 0x40000000 entries. Older 0x3fffffff-entry caches are incompatible.
+#define large_prime 0x40000000
 #define large_size 1573741823
 
 #define primeint30 1073741827

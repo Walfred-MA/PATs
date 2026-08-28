@@ -32,14 +32,14 @@ typedef unsigned char  uint8;
 
 extern bool ifmask;
 
-#define large_prime 2147483647
+constexpr ull kHash128Prime = 2147483647ULL;
 
 
 struct hash_128 {
     
     size_t operator()(const u128& num128) const
     {
-        auto hash1 = hash<ull>{}((ull)(num128%large_prime));
+        auto hash1 = hash<ull>{}((ull)(num128 % kHash128Prime));
         return hash1;
     }
 };

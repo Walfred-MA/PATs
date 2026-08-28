@@ -25,15 +25,22 @@ def selfblastn(input,nthreads):
     
     #cmd = "makeblastdb -in {}  -dbtype nucl -parse_seqids -out {}_db ".format(input, input)
    
-    dbcmd = "{}/makefastdb.sh  {} {}_db {}".format(script_folder,nthreads, input, input) 
-    os.system(dbcmd)
+    #dbcmd = "{}/makefastdb.sh  {} {}_db {}".format(script_folder,nthreads, input, input) 
+    #os.system(dbcmd)
     
     #cmd = "blastn -task megablast  -query {} -db {}_db -gapopen 10 -gapextend 2 -word_size 30  -perc_identity 95 -evalue 1e-200 -outfmt 17 -out {}_selfblast.out  -num_threads {} -max_target_seqs 100".format( input , input, input,nthreads)
     
-    cmd = "{}/runfast.sh {} {}_db {} 0.95 300 > {}_selfblast.out".format(script_folder,  input,input, nthreads, input)
-    os.system(cmd)
+    #cmd = "{}/runfast.sh {} {}_db {} 0.95 300 > {}_selfblast.out".format(script_folder,  input,input, nthreads, input)
+    #os.system(cmd)
     
     return "{}_selfblast.out".format(input)
+
+def selfalign(input,output,nthreads):
+    
+    cmd = "{}/runwinnowmap.sh {} {} {} 0.95 150 > {}_selfblast.out".format(script_folder,  input,input, nthreads, input)
+    os.system(cmd)
+        
+    
 
 def getsegments(seq, header, segments, output, anchor = pathminsize):
     
@@ -668,13 +675,16 @@ def process_eachquery(queries_index, alignfile, index, seqs, qname, header, outp
     lock1.acquire()
     getsegments(seqs[qname], header, allaligns, output)
     lock1.release()
-    
+
+    return sum([x[1]-x[0] for x in allaligns] + [0])
+
 def cleanrepeats(inputfile, output, nthreads = 1):
    
     alignfile = "{}_selfblast.out".format(inputfile) 
     seqs = {}
     headers = {}
     queries = []
+    totalbefore = 0
     with open(inputfile, mode = 'r') as f:
         for line in f:
             if len(line) and line[0] == '>':
@@ -684,13 +694,8 @@ def cleanrepeats(inputfile, output, nthreads = 1):
                 seqs[qname] = ""
                 queries.append(qname)
             else:   
-                try:
-                    seqs[qname] += line.strip()
-                    
-                except:
-                    print(line)
-                    print(inputfile)
-                    exit(0)
+                seqs[qname] += line.strip()
+                totalbefore += len(seqs[qname])
     queries_index = {x:i for i,x in enumerate(queries)}
     try:
         os.remove(output)
@@ -700,19 +705,43 @@ def cleanrepeats(inputfile, output, nthreads = 1):
     manager = mul.Manager()
     seqs = manager.dict(seqs)
     p=mul.Pool(processes=nthreads)
-    
+    async_results = []
     for index,qname in enumerate(queries):
       
         #process_eachquery(queries_index, alignfile, index, seqs, qname, headers[qname], output) 
-        p.apply_async(process_eachquery, (queries_index, alignfile, index, seqs, qname, headers[qname], output))
-    
+        ar = p.apply_async(process_eachquery, (queries_index, alignfile, index, seqs, qname, headers[qname], output))
+        async_results.append(ar)
     p.close()
     p.join()
+
+    total = 0
+    for ar in async_results:
+        r = ar.get()          # if worker crashed, this will raise (good)
+        total += (r or 0)     # None -> 0
+
+    return totalbefore-total
+
         
 def main(args):
     
-    cleanrepeats(args.input, args.output, args.threads)
-    
+    total = 0
+    cleaned = 100000000000
+    cycle = 0
+    theinput = args.input
+    theoutput = args.output
+    thetemp  = args.output + ".temp"
+    while cleaned > 300 and  cycle < args.cycle:
+        if cycle > 0:
+            theinput = theoutput
+            theoutput = args.output if theoutput  == thetemp else thetemp
+
+        selfalign(theinput, theoutput, args.threads)
+        cleaned = cleanrepeats(theinput, theoutput, args.threads)
+        cycle += 1
+        total += cleaned
+        print(f"[cycle] {args.input} cycle {cycle} of {args.cycle} clean = {cleaned}")
+
+    print(f"[cleanrepeats] {args.input} total clean = {total}") 
     
 def run():
     """
@@ -723,7 +752,7 @@ def run():
     parser.add_argument("-i", "--input", help="path to output file", dest="input", type=str,required=True)
     parser.add_argument("-o", "--output", help="path to output file", dest="output", type=str,required=True)
     parser.add_argument("-t", "--threads", help="path to output file", dest="threads", type=int,default = 1)
-    
+    parser.add_argument("-c", "--cycle", help="path to output file", dest="cycle", type=int,default = 1)
     parser.set_defaults(func=main)
     args = parser.parse_args()
     args.func(args)

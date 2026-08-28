@@ -25,6 +25,7 @@
 #include "fasta.hpp"
 #include "KmerStruct.hpp"
 #include "gzfile.hpp"
+#include "Blacklist.hpp"
 
 using namespace std;
 extern bool singletarget;
@@ -159,29 +160,37 @@ void kmer_filter<dictsize>::read_counttarget(typefile &fastafile, kmer_set_type_
     iftarget = 1;
     
     std::string StrLine(10000,'\0');
+    BlacklistIntervals::HeaderRegion blacklist_region;
+    unsigned long long sequence_offset = 0;
     
     while (fastafile.nextLine(StrLine))
     {
+        if (StrLine.empty()) continue;
+
         switch (StrLine[0])
         {
             case '@':  case '+': case '>':
                 current_size = 0;
+                sequence_offset = 0;
+                blacklist_region = blacklist_intervals.parse_header_region(StrLine);
                 continue;
             case ' ': case '\n': case '\t':
                 continue;
             default:
                 break;
         }
-        
+
         for (auto base: StrLine)
         {
             if (base == '\0') break;
             
             if (base == '\n' || base == ' ' || base == '\t') continue;
 
+            sequence_offset++;
             kmer_read_f_(base, current_size, current_kmer, reverse_kmer);
             
             if ( current_size < klen || (ifmask && base >= 'a') ) continue;
+            if (blacklist_intervals.overlaps_sequence_span(blacklist_region, sequence_offset - klen, sequence_offset)) continue;
                                 
             auto larger_kmer = (current_kmer >= reverse_kmer) ? current_kmer : reverse_kmer;
            
@@ -346,16 +355,21 @@ void kmer_filter<dictsize>::read_file()
         kmer_set_type_nt exclude_map_nt;
                 
         string cachefile = targetfile + "_allkmer.cache";
-        if (FILE *f = fopen(cachefile.c_str(), "r"))
+        if (FILE *f = fopen(cachefile.c_str(), "r"); f && !blacklist_intervals.enabled())
         {
             fclose(f);
             read_cache_to_map(cachefile.c_str(), target_map_nt);
             std::remove(cachefile.c_str());
         }
-        else if (targetfile.size())
+        else
         {
-            fasta targetfile_(targetfile.c_str());
-            read_counttarget(targetfile_, target_map_nt, exclude_map_nt);
+            if (f) fclose(f);
+            if (blacklist_intervals.enabled()) std::remove(cachefile.c_str());
+            if (targetfile.size())
+            {
+                fasta targetfile_(targetfile.c_str());
+                read_counttarget(targetfile_, target_map_nt, exclude_map_nt);
+            }
         }
         
         for (std::string &prefix: prefixes)
@@ -453,5 +467,3 @@ void kmer_filter<dictsize>::write(const char * outputfile, kmer_set_type_nt &tar
 }
 
 #endif /* KmerFilter_hpp */
-
-

@@ -6,10 +6,15 @@ import collections as cl
 
 mainchr = ['chr1', 'chr2', 'chr3', 'chr4', 'chr5', 'chr6', 'chr7', 'chr8', 'chr9', 'chr10', 'chr11', 'chr12', 'chr13', 'chr14', 'chr15', 'chr16', 'chr17', 'chr18', 'chr19', 'chr20', 'chr21', 'chr22', 'chrX', 'chrY', 'chrM']
 
+def record_filename(header):
+	name = header.split()[0].replace("#", "_h").replace(":", "_").replace("-", "_").replace(".", "v")
+	return name + ".fa"
+
 def filesplit(inputpath, outpath, ifsample=1):
 	
 	wfiles= {}
 	wfile =None	
+	ordered_files = []
 	with open(inputpath, mode = "r") as f:
 		
 		for line in f:
@@ -20,7 +25,7 @@ def filesplit(inputpath, outpath, ifsample=1):
 			if line[0] == ">":
 			        	
 				header = line[1:].strip()
-				name = header.split()[0].replace("#","_h").replace(":","_").replace("-","_").replace(".","v")
+				name = record_filename(header)[:-3]
 				haplo = "_h".join(header.split()[1].split("#")[:2]) if len(header.split()) > 1 else ""
 				if ":" in haplo:
 					if  "NC_0609" in haplo:
@@ -37,7 +42,9 @@ def filesplit(inputpath, outpath, ifsample=1):
 					if wfile is not None:
 						wfile.close()
 					
-					wfile = open(outpath+name+".fa",mode = 'w') 
+					wfilename = os.path.join(outpath, name + ".fa")
+					wfile = open(wfilename, mode = 'w')
+					ordered_files.append(wfilename)
 		
 				elif ifsample == 1:
 					
@@ -48,11 +55,12 @@ def filesplit(inputpath, outpath, ifsample=1):
 						else:
 							haplo = "HG38_h1"
 					
-					wfilename = outpath+haplo+".fa"
+					wfilename = os.path.join(outpath, haplo + ".fa")
 					
 					if wfilename not in wfiles:
 						
-						wfiles[wfilename] = open(outpath+haplo+".fa",mode = 'w')
+						wfiles[wfilename] = open(wfilename,mode = 'w')
+						ordered_files.append(wfilename)
 					
 					wfile = wfiles[wfilename]
 					
@@ -69,6 +77,8 @@ def filesplit(inputpath, outpath, ifsample=1):
 		for wfilename, wfile in wfiles.items():
 		
 			wfile.close()
+
+	return ordered_files
 		
 					
 def main(args):

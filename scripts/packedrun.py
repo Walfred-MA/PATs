@@ -1,71 +1,164 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 
+import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-def run_or_fail(command):
+from tooling import resolve_executable, run
+
+
+def run_python(script: Path, arguments: list[object], *, stdout: Path | None = None) -> None:
+    command = [sys.executable, str(script), *(str(value) for value in arguments)]
+    print(f"[PATs] packedrun: {' '.join(command)}", flush=True)
+    if stdout is None:
+        subprocess.run(command, check=True)
+    else:
+        stdout.parent.mkdir(parents=True, exist_ok=True)
+        with stdout.open("w") as handle:
+            subprocess.run(command, check=True, stdout=handle)
+
+
+def link_graph(source: Path, destination: Path) -> None:
+    if destination.is_symlink() or destination.exists():
+        destination.unlink()
     try:
-        subprocess.run(command, shell=True, check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Command failed: {command}")
-        print(f"[ERROR] Exit code: {e.returncode}")
-        if e.returncode == -9:
-            print("[OOM] Likely killed by out-of-memory (SIGKILL).")
-        sys.exit(1)
-        
-def main():
-    rerun = 1
-    inputfile = sys.argv[1]
-    rerun = int(sys.argv[2]) if len(sys.argv) > 2 else 0
-    kmerfile = inputfile + "_kmer.list"
-    normfile = inputfile + "_norm.gz"
-    treefile = inputfile + "_tree.fa"
-    newkmerfile = inputfile + "_tree.fa_kmer.list"
-    matrixfile = inputfile + "_kmatrix.txt"
-    
-    print("running: " + inputfile)
-    
-    folder = os.path.dirname(os.path.abspath(inputfile))
-    script_folder = os.path.dirname(os.path.abspath(__file__))
-   
-    folders = str(folder).split("/")
-
-    graphfile = "{}/{}{}{}_samples.fasta_fixed.fa_loci.txt.fasta".format("/".join(folders[:-2]),folders[-5].split("_")[0], folders[-3], "_".join(folders[-5].split("_")[1:]))
-    graphinfo = "{}/{}{}{}_samples.fasta_fixed.fa_loci.txt".format("/".join(folders[:-2]),folders[-5].split("_")[0], folders[-3], "_".join(folders[-5].split("_")[1:]))
+        destination.symlink_to(source.resolve())
+    except OSError:
+        shutil.copyfile(source, destination)
 
 
-    # Step 1: skip if matrix file exists and is large enough
-    if not rerun and (os.path.isfile(matrixfile) and os.path.getsize(matrixfile) > 100):
-        return
-    
-    # Step 2: run kmernorm
-    if rerun or not (os.path.isfile(normfile) and os.path.getsize(normfile) > 100):
-        run_or_fail(f"python {script_folder}/querylist_filterbykmer.py -c 1000 -r 0.10 -i {inputfile} -k {kmerfile} -o {inputfile}_filed.fa -l {inputfile}_filed.fa_kmer.list -p 1 > {inputfile}_filed.fa_info.txt")
-        run_or_fail(f"{script_folder}/kmernorm -i {inputfile}_filed.fa -k {inputfile}_filed.fa_kmer.list -o {inputfile}_filed.fa_norm.gz  -w 1 -h 1")
-        
-        inputfile = inputfile + "_filed.fa"
-        kmerfile = inputfile + "_kmer.list"
-        normfile = inputfile + "_norm.gz"
-        
-    # Step 4: run kmertree
-    if rerun or not (os.path.isfile(treefile) and os.path.getsize(treefile) > 100):
-        run_or_fail(f"{script_folder}/kmertree -i {inputfile} -n {normfile} -o {treefile}")
-    
-    # Step 5: run kmerannotate
-    if rerun or not (os.path.isfile(newkmerfile) and os.path.getsize(newkmerfile) > 100):
-        if os.path.isfile(graphfile+"_allgraphalign.out") and os.path.getsize(graphfile+"_allgraphalign.out") > 100:
-            print("find graphfile: "+graphfile)
-            run_or_fail(f"python {script_folder}/kmerannotate.py -k {kmerfile} -s {graphfile} -g {graphfile}_graph.FA -a {graphfile}_allgraphalign.out -o {newkmerfile}")
-            run_or_fail(f"bash {script_folder}/headeraddinfor.sh {newkmerfile} {graphinfo}")
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Normalize a final locus FASTA and compile one PATs matrix shard."
+    )
+    parser.add_argument("-i", "--input", required=True)
+    parser.add_argument("-k", "--kmers", required=True)
+    parser.add_argument("-r", "--reference", required=True, help="target-group reference FASTA")
+    parser.add_argument("-g", "--graph", default="", help="gfixbreaks graph FASTA base")
+    parser.add_argument("-a", "--alignment", default="", help="gfixbreaks full graph alignment")
+    parser.add_argument("-o", "--output", required=True)
+    parser.add_argument("--scripts-dir", required=True, help="redesigned PATs Python scripts")
+    parser.add_argument("--tools-dir", required=True, help="compiled PATs binaries")
+    parser.add_argument("--reference-sample", required=True)
+    parser.add_argument("--kmer-cutoff", type=int, default=1_000)
+    parser.add_argument("--kmer-ratio", type=float, default=0.10)
+    args = parser.parse_args()
 
-        else:
-            run_or_fail(f"python {script_folder}/kmerannotate.py -k {kmerfile} -o {newkmerfile}")
-            
-    # Step 6: compile matrix
-    if rerun or not (os.path.isfile(matrixfile) and os.path.getsize(matrixfile) > 100):
-        run_or_fail(f"python {script_folder}/matrixcompile.py -s {treefile} -k {newkmerfile} -o {matrixfile}")
-        
+    scripts_dir = Path(args.scripts_dir)
+    tools_dir = Path(args.tools_dir)
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    prefix = output.parent / output.stem
+    filtered_fasta = Path(f"{prefix}.filtered.fa")
+    filtered_kmers = Path(f"{filtered_fasta}.kmer.list")
+    norm = Path(f"{filtered_fasta}.norm.gz")
+    tree = Path(f"{prefix}.tree.fa")
+    annotated_kmers = Path(f"{tree}.kmer.list")
+
+    query_filter = scripts_dir / "querylist_filterbykmer.py"
+    run_python(
+        query_filter,
+        [
+            "-c",
+            args.kmer_cutoff,
+            "-r",
+            args.kmer_ratio,
+            "-i",
+            args.input,
+            "-k",
+            args.kmers,
+            "-o",
+            filtered_fasta,
+            "-l",
+            filtered_kmers,
+            "-p",
+            "1",
+        ],
+        stdout=Path(f"{filtered_fasta}.info.txt"),
+    )
+    if not filtered_fasta.is_file() or filtered_fasta.stat().st_size == 0:
+        raise RuntimeError("packedrun filtering removed every locus sequence")
+
+    kmernorm = resolve_executable(tools_dir, ("kmernorm",), label="kmernorm")
+    run(
+        [
+            kmernorm,
+            "-i",
+            filtered_fasta,
+            "-k",
+            filtered_kmers,
+            "-o",
+            norm,
+            "-w",
+            "1",
+            "-h",
+            "1",
+        ],
+        label="packedrun k-mer normalization",
+    )
+    kmertree = resolve_executable(tools_dir, ("kmertree",), label="kmertree")
+    run([kmertree, "-i", filtered_fasta, "-n", norm, "-o", tree], label="packedrun tree")
+
+    kmerstrd = resolve_executable(
+        tools_dir,
+        ("kmerstrd", "KmerStrd"),
+        label="kmerstrd",
+    )
+    oriented_tree = Path(f"{tree}.oriented")
+    run(
+        [kmerstrd, "-i", tree, "-r", args.reference, "-o", oriented_tree],
+        label="packedrun orient tree",
+    )
+    os.replace(oriented_tree, tree)
+
+    graph = Path(args.graph) if args.graph else None
+    alignment = Path(args.alignment) if args.alignment else None
+    annotate_args: list[object] = [
+        "-k",
+        filtered_kmers,
+        "-o",
+        annotated_kmers,
+        "-p",
+        args.reference_sample,
+    ]
+    if graph and alignment and graph.is_file() and alignment.is_file() and alignment.stat().st_size > 0:
+        local_alignment = Path(f"{tree}.allgraphalign.out")
+        run_python(
+            scripts_dir / "getLocalCigar.py",
+            ["-i", tree, "-s", graph, "-a", alignment, "-o", local_alignment],
+        )
+        graph_fasta = Path(f"{graph}_graph.FA")
+        if graph_fasta.is_file() and local_alignment.is_file() and local_alignment.stat().st_size > 0:
+            tree_graph = Path(f"{tree}_graph.FA")
+            link_graph(graph_fasta, tree_graph)
+            annotate_args = [
+                "-k",
+                filtered_kmers,
+                "-s",
+                tree,
+                "-g",
+                tree_graph,
+                "-a",
+                local_alignment,
+                "-o",
+                annotated_kmers,
+                "-p",
+                args.reference_sample,
+            ]
+
+    run_python(scripts_dir / "kmerannotate.py", annotate_args)
+    run_python(
+        scripts_dir / "matrixcompile.py",
+        ["-s", tree, "-k", annotated_kmers, "-o", output],
+    )
+    if not output.is_file() or output.stat().st_size == 0:
+        raise RuntimeError(f"matrixcompile.py produced no matrix shard: {output}")
+    return 0
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

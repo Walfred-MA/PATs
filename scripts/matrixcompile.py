@@ -11,6 +11,9 @@ import argparse
 import gzip
 from array import array
 
+from matrixformat import MATRIX_VERSION, encode_metadata
+
+hg38_primary_contigs = set([  'chr1', 'chr2', 'chr3', 'chr4', 'chr5', 'chr6', 'chr7', 'chr8', 'chr9', 'chr10', 'chr11', 'chr12', 'chr13', 'chr14', 'chr15', 'chr16', 'chr17', 'chr18', 'chr19','chr20', 'chr21', 'chr22', 'chrX', 'chrY', 'chrM'])
 
 def kmerencode(kmer):
 	
@@ -62,6 +65,7 @@ def intencode(value, length = 0):
 		
 	if len(code) < length :
 		code = (length-len(code))*"0" + code
+		
 	return code
 
 class UPGMANode:
@@ -364,7 +368,11 @@ def hashrow(kmerindex , genenum, KmerReader ):
 	
 	return ( - (abs( len(row) -  genenum/2 - 0.1 ))  , hash(row) )
 
-
+def hashrow2(kmerindex , genenum, KmerReader ):
+	
+	row = tuple(sorted(list(set(KmerReader.matrix[kmerindex] ) ) )) 
+	
+	return ( - (abs( len(row) -  genenum/2 - 0.1 ))  , hash(row) )
 
 
 class KmerData:
@@ -378,7 +386,7 @@ class KmerData:
 		self.genekmercounts = []
 		self.mask = 1
 		self.samplesizes = []  
-		
+		self.kmerheaders = []
 		self.kmerflag = dict() 
 		
 		self.headers = []
@@ -397,8 +405,8 @@ class KmerData:
 		
 		self.genekmercounts = []
 		
-		self.matrix = [array('H') for _ in self.kmerslist]
-		self.rowlength = [0]  * ( len(self.kmerslist) + 1 )
+		self.matrix = [array('H') for _ in range(len(self.kmerslist)+len(self.maskedlist)+1)]
+		self.rowlength = [0]  * ( len(self.kmerslist)+len(self.maskedlist) + 1 )
 		
 		
 	def LoadSamples(self,seqfile):
@@ -429,7 +437,9 @@ class KmerData:
 		
 	def LoadKmers(self, kmerfile):
 		
+		self.kmerheaders = []
 		headers = []
+		maskindex = 0
 		kmerindex = 0
 		with open(kmerfile, mode = 'r') as f:
 			
@@ -438,27 +448,36 @@ class KmerData:
 					header = "+"+line[1:].strip()
 					headers.append(header)
 					
+				if line[0] == ">" and len(line.strip()) > 1:
+					self.kmerheaders.append(line.split()[0][1:])
+					
 				elif len(line) and line[0] != ">":
 					
 					elements = line.strip().split()
 					flag = "0"
 					ratio = "0"
 					if len(elements) > 2:
-						kmer, pathindex, pathloc,flag,ratio = elements
-						
+						kmer, pathindex, pathloc,rsize,qindex,qposi,flag,ratio= elements
+						pathloc = int(pathloc)
 						self.pathsize[pathindex] = max(self.pathsize[pathindex], int(pathloc) + 1)
 						self.numpath = max(self.numpath, int(pathindex))
 					else:
 						kmer = elements[0]
 						pathindex = "0"
-						pathloc = "0"
+						pathloc = 0
+						rsize = "31"
+						qindex = "0"
+						qposi = "0"
 						
 					if kmer.isupper():
-						self.kmerslist[kmerencode(kmer)] = ( kmerindex , pathindex , pathloc, flag, ratio)
+						self.kmerslist[kmerencode(kmer)] = ( kmerindex , pathindex , pathloc,rsize,qindex,qposi, flag, ratio)
 						kmerindex += 1
 					elif self.mask and int(pathindex) and int(pathloc) >= 15:
-						self.maskedlist[kmerencode(kmer)] = ( kmerindex , pathindex , pathloc, flag, ratio)
-						
+						maskindex += 1
+						self.maskedlist[kmerencode(kmer)] = ( kmerindex+maskindex , pathindex , pathloc, rsize,qindex,qposi,flag, ratio)
+		self.kmerindex = kmerindex
+		self.maskindex = maskindex
+		
 		self.pathtitles = "\n".join(headers)
 		return "\n".join(headers)
 	
@@ -467,10 +486,16 @@ class KmerData:
 		
 		kmerindex = self.kmerslist.get(kmer, (-1,-1,-1,0) )[0] 
 		
+		ifmask = 0
+		if kmerindex < 0:
+			kmerindex =  self.maskedlist.get(kmer, (-1,-1,-1,0) )[0] 
+			ifmask = 1
+			
 		if kmerindex >= 0:
 			
-			self.genekmercounts[index] += 1
-			
+			if not ifmask:
+				self.genekmercounts[index] += 1
+				
 			if self.rowlength[kmerindex] % 1000 == 0:
 				self.matrix[kmerindex].extend(1000*[0])
 				
@@ -547,7 +572,6 @@ class KmerData:
 						
 					else:
 						
-						
 						current_k <<= 2
 						current_k += ['A','C','G','T'].index(char)
 						reverse_k += (3-['A','C','G','T'].index(char)) * ( 1 << (2*current_size))
@@ -559,6 +583,7 @@ class KmerData:
 						kmer = max(current_k, reverse_k)
 						
 						findindex = self.AddKmer(kmer,index)
+						
 						
 						
 						
@@ -584,13 +609,29 @@ class node:
 			parent.children.append(self)
 			
 	def __str__(self):
-		
-		if len(self.children) == 0:
-			
-			return self.name+":"+"{:.7f}".format(self.distance)
-		
-		else:
-			return "("+",".join([str(x) for x in self.children])+"):"+"{:.7f}".format(self.distance)
+		parts = []
+		stack = [(0, self)]
+
+		while stack:
+			item_type, item = stack.pop()
+			if item_type == 1:
+				parts.append(item)
+				continue
+
+			current = item
+			distance = "{:.7f}".format(current.distance)
+			if len(current.children) == 0:
+				parts.append(current.name + ":" + distance)
+				continue
+
+			stack.append((1, "):" + distance))
+			for child_index in range(len(current.children) - 1, -1, -1):
+				stack.append((0, current.children[child_index]))
+				if child_index > 0:
+					stack.append((1, ","))
+			stack.append((1, "("))
+
+		return "".join(parts)
 		
 	def push(self, name = "", distance =0.0, index = 0):
 		
@@ -823,13 +864,13 @@ def loaddata(seqfile, KmerReader):
 			
 		"""
 		with gzip.open(seqfile+ "_norm.txt.gz", mode = 'rt', encoding='utf-8') as f:
-			
+
 			sqmatrix = []
 			for line in f:
-				
+
 				if len(line) == 0:
 					continue
-				
+
 				sqmatrix += list(map(float,line.strip().replace(","," ").split(" ")))
 		"""
 			
@@ -896,6 +937,7 @@ def reductdimension(sqmatrix, treetext, headers, excludeindex, mergecutoffsmall,
 	
 	notuseindex = excludeindex.union(set([newindex[x] for x in mergedindex.keys()]))
 	newindex = [x for i,x in enumerate(newindex) if i not in mergedindex]
+	
 	genenum -= len(mergedindex)
 	
 	largemergedindex = dict()
@@ -920,23 +962,30 @@ def gettitles(headers, excludeindex, notuseindex, alignfile):
 	if len(alignfile):
 		allpathaligns = pathinformation(alignfile)
 		
-		
+	sampletonewindex = cl.defaultdict(int)
 	titletext = [""]
+	lastindex = 0
 	for i,x in enumerate(headers):
-		x = x.strip().split("\t")[:2]
+		x = x.strip().split()[:2]
+		name = x[0][1:]
 		x = "\t".join(x +[allpathaligns.get(x[0][1:],'NA:NA')])
 		
 		if i in excludeindex:
 			continue
 		elif i in notuseindex:
 			titletext[-1]+=";"+x
+			sampletonewindex[name] = lastindex
 		else:
+			lastindex += 1
+			sampletonewindex[name] = lastindex
 			titletext.append(x)
+			
+			
 			
 	titletext = "\n".join(titletext[1:])
 	
 	
-	return titletext
+	return titletext,sampletonewindex
 
 
 def rowtotext(counts):
@@ -1018,7 +1067,7 @@ class phylotree:
 		""" 
 		for index,node in enumerate(self.tree):
 			if  len(node.children) == 0:
-				
+
 				parent = node.parent
 				thesum = node.distance
 				while parent is not None:
@@ -1065,11 +1114,12 @@ def getgroupkmercounts(KmerReader, groups):
 			
 	return groups_kmercounts
 
-def outputmask(KmerReader, genenum, phylocounts, groups,f):
+def outputmask(KmerReader, genenum, phylocounts, groups, sampletonewindex,f):
+	
+	maskstart = KmerReader.kmerindex + 1
 	
 	allkmers = sorted( list(KmerReader.maskedlist.keys()) , key = lambda x: KmerReader.maskedlist[x])
-	
-	allkmers_sortindex = sorted(range(len(allkmers)), key = lambda x: hashrow(x, genenum, KmerReader ))
+	allkmers_sortindex = sorted(range(len(allkmers)), key = lambda x: hashrow2(x+maskstart, genenum, KmerReader ))
 	
 	lastsign = ""
 	lastrow = []
@@ -1078,25 +1128,33 @@ def outputmask(KmerReader, genenum, phylocounts, groups,f):
 		
 		kmer = allkmers[kmerindex]
 		
+		kmerindex += maskstart
 		counts = list(KmerReader.matrix[kmerindex])[:KmerReader.rowlength[kmerindex]]
 		counts = sorted(list(set(counts)))
 		
-		kmerlistindex, kmerpath, kmerloc, kmerflag, kmerratio = KmerReader.maskedlist[kmer]
-		
+		kmerlistindex, kmerpath, kmerloc, rsize, qindex, qposi, kmerflag, kmerratio = KmerReader.maskedlist[kmer]
+		qindex = sampletonewindex[int(qindex)]
+		tag_field, path_field, location_field = encode_metadata(
+			max(0, int(kmerpath)), kmerloc, max(0, int(rsize)), qindex,
+			int(qposi), kmerflag, kmerratio
+		)
 		theset = set(counts)
 		
 		if len(theset) == 0:
 			continue
 		
 		allgroups = []
-				
+		
 		if len(theset) <= genenum*0.5 or len(counts) != len(theset):
 			sign = "+"
 		else:
 			sign = "-"
 			
 		if sign == lastsign and counts == lastcounts:
-			line = ["*" + ( "_" if sign == '-' else "=" ) , intencode(max(0,int(kmerflag))) + "|" + intencode( min(1000, int(100 * float(kmerratio) + 0.5)) ) , intencode(max(0,int(kmerpath)), length = 3) , intencode(max(0, int(kmerloc)), length = 5),  intencode(kmer,length = 11),""]
+			
+			
+			line = ["*" + ( "_" if sign == '-' else "=" ), tag_field,
+				path_field, location_field, intencode(kmer, length=11), ""]
 			
 		else: 
 			
@@ -1111,16 +1169,17 @@ def outputmask(KmerReader, genenum, phylocounts, groups,f):
 			#groupcounter = cl.Counter([groups_dict[x] for x in counts])    
 			#groupmean = [(groupcounter[k]/c+0.5) for k,c in group_counts.items()]
 			rowtext = " "
-			line = ["*" + sign, intencode(max(0,int(kmerflag))) + "|" + intencode( min(1000, int(100 * float(kmerratio) + 0.5)) )  ,intencode(max(0,int(kmerpath)), length = 3) , intencode(max(0, int(kmerloc)), length = 5),  intencode(kmer, length = 11), oldrow + " " + rowtext]
+			line = ["*" + sign, tag_field, path_field, location_field,
+				intencode(kmer, length=11), oldrow + " " + rowtext]
 			
 		f.write("\t".join(line)+"\n")
 		
 		lastcounts = counts
 		lastsign = sign
 		
-	
-
-def output(KmerReader, genenum, phylocounts, groups, f):
+		
+		
+def output(KmerReader, genenum, phylocounts, groups, sampletonewindex, f):
 	
 	
 	allkmers = sorted( list(KmerReader.kmerslist.keys()) , key = lambda x: KmerReader.kmerslist[x])
@@ -1134,7 +1193,7 @@ def output(KmerReader, genenum, phylocounts, groups, f):
 	for i,group in enumerate(groups):
 		for x in group:
 			groups_dict[x] = i
-			
+
 	group_counts = {i:len(x) for i,x in enumerate(groups)}  
 	"""
 	
@@ -1148,7 +1207,13 @@ def output(KmerReader, genenum, phylocounts, groups, f):
 		counts = list(KmerReader.matrix[kmerindex])[:KmerReader.rowlength[kmerindex]]
 		counts = sorted(counts)
 		
-		kmerlistindex, kmerpath, kmerloc, kmerflag, kmerratio = KmerReader.kmerslist[kmer]
+		kmerlistindex, kmerpath, kmerloc, rsize, qindex, qposi, kmerflag, kmerratio = KmerReader.kmerslist[kmer]
+		qindex = sampletonewindex[int(qindex)]
+		tag_field, path_field, location_field = encode_metadata(
+			max(0, int(kmerpath)), kmerloc, max(0, int(rsize)), qindex,
+			int(qposi), kmerflag, kmerratio
+		)
+		
 		
 		theset = set(counts)
 		
@@ -1163,7 +1228,8 @@ def output(KmerReader, genenum, phylocounts, groups, f):
 			sign = "-"
 			
 		if sign == lastsign and counts == lastcounts:
-			line = ["&" + ( "_" if sign == '-' else "=" ) , intencode(max(0,int(kmerflag))) + "|" + intencode( min(1000, int(100 * float(kmerratio) + 0.5)) ) , intencode(max(0,int(kmerpath)), length = 3) , intencode(max(0, int(kmerloc)), length = 5),  intencode(kmer,length = 11),""]
+			line = ["&" + ( "_" if sign == '-' else "=" ), tag_field,
+				path_field, location_field, intencode(kmer, length=11), ""]
 			
 		else: 
 			row = phylocounts.treeencodes(counts)
@@ -1185,10 +1251,11 @@ def output(KmerReader, genenum, phylocounts, groups, f):
 				
 			rowtext = ",".join([intencode(abs(x)) for x in row1] + [""]) + " " + ",".join([intencode(abs(x)) for x in row2] + [""])
 			#rowtext = rowtotext(row)
-			line = ["&" + sign, intencode(max(0,int(kmerflag))) + "|" + intencode( min(1000, int(100 * float(kmerratio) + 0.5)) )  ,intencode(max(0,int(kmerpath)), length = 3) , intencode(max(0, int(kmerloc)), length = 5),  intencode(kmer, length = 11), oldrow + " " + rowtext]
+			line = ["&" + sign, tag_field, path_field, location_field,
+				intencode(kmer, length=11), oldrow + " " + rowtext]
 			
 		f.write("\t".join(line)+"\n")
-		
+		line.clear()
 		lastcounts = counts
 		lastsign = sign
 		
@@ -1207,18 +1274,39 @@ def main(args):
 	
 	sqmatrix, treetext = loaddata(args.seq, KmerReader)
 	
-	excludeindex = set([i for i,name in enumerate(KmerReader.headers) if name.split()[1].split(":")[0].split("#")[0] in excludenames])
+	#excludeindex = set([i for i,name in enumerate(KmerReader.headers) if name.split()[0].split("_")[1] in excludenames or "_".join(name.split()[0].split("_")[1:3]) in excludenames])
 	
+	excludeindex = set()
+	use_alt_exclude = ("Alt" in excludenames)
+	
+	for i, header in enumerate(KmerReader.headers):
+		fields = header.split()
+		name0 = fields[0]
+		name1 = name0.split("_")[1] if len(name0.split("_")) > 1 else ""
+		name2 = "_".join(name0.split("_")[1:3])
+		
+		exclude_flag = (name1 in excludenames or name2 in excludenames)
+		
+		if use_alt_exclude:
+			if len(fields) > 1:
+				contig = fields[1].rstrip("+-").split(":")[0]
+				if "_HG38_" in name0 and contig not in hg38_primary_contigs:
+					exclude_flag = True
+					
+		if exclude_flag:
+			excludeindex.add(i)
+			
 	sqmatrix, treetext, notuseindex, smallgroups, largegroups = reductdimension(sqmatrix, treetext, KmerReader.headers, excludeindex, args.merge ,0.2)
 	genenum -= len(notuseindex)
 	
+	titletext,sampletonewindex = gettitles(KmerReader.headers, excludeindex, notuseindex, args.align)
 	
-	
-	titletext = gettitles(KmerReader.headers, excludeindex, notuseindex, args.align)
-	
+	for i,genename in enumerate(KmerReader.kmerheaders):
+		sampletonewindex[i+1] = sampletonewindex[genename]
+		
 	#sqmatrix = MatrixFulltoUpper(sqmatrix, genenum)
 	#sqmatrix = "\n$".join([  " ".join(list(map(str,sqmatrix[i]))) for i in range(genenum)])
-	
+		
 	filternames = [x for i,x in enumerate(KmerReader.sampleslist) if i in notuseindex]
 	#keepnames = [x for i,x in enumerate(KmerReader.sampleslist) if i not in notuseindex]
 	
@@ -1233,8 +1321,8 @@ def main(args):
 	
 	kmernum = sum([1 for kmerindex in range(len(KmerReader.kmerslist)) if KmerReader.rowlength[kmerindex] > 0])
 	elenum = sum([KmerReader.rowlength[kmerindex] for kmerindex in range(len(KmerReader.kmerslist))])
-	
-	
+	if kmernum == 0:
+		return 
 	phylocounts = phylotree(treetext)
 	with open(outfile, mode = 'w') as f:
 		
@@ -1249,10 +1337,10 @@ def main(args):
 		f.write(smallgroups+"\n")
 		
 		if len(KmerReader.kmerslist):
-			output(KmerReader, genenum, phylocounts,largegroups, f)
+			output(KmerReader, genenum, phylocounts,largegroups, sampletonewindex,f)
 			
 		if len(KmerReader.maskedlist):
-			outputmask(KmerReader, genenum, phylocounts,largegroups, f)
+			outputmask(KmerReader, genenum, phylocounts,largegroups, sampletonewindex,f)
 			
 			
 def run():
@@ -1274,3 +1362,5 @@ def run():
 	
 if __name__ == "__main__":
 	run()
+	
+	

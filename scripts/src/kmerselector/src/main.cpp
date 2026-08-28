@@ -14,6 +14,7 @@
 
 #include "KmerCounter.hpp"
 #include "KmerFilter.hpp"
+#include "Blacklist.hpp"
 #include "fasta.hpp"
 #include "gzfile.hpp"
 
@@ -22,6 +23,13 @@ bool ifmask = 0;
 
 extern bool singletarget;
 bool singletarget = 0;
+
+BlacklistIntervals blacklist_intervals;
+
+// Default: assemblies absent from a matrix do not contribute exclusion kmers.
+// --strict-mod restores the historical all-assemblies/all-matrices behavior.
+bool strict_mod = false;
+
 using namespace std;
 
 void shuffle_pair(std::vector<std::string> &vec1, std::vector<std::string> &vec2)
@@ -96,6 +104,8 @@ int main(int argc, const char * argv[]) {
     std::vector<std::string> kmerfiles;
     
     std::vector<std::string> outputfiles;
+    
+    std::vector<std::string> blacklistfiles;
 
     const char* Argument="";
         
@@ -105,6 +115,12 @@ int main(int argc, const char * argv[]) {
     {
         if (argv[i][0] == '-')
             {
+                if (strcmp(argv[i], "--strict-mod") == 0)
+                    {
+                        strict_mod = true;
+                        Argument = "";
+                        continue;
+                    }
                 Argument = argv[i];
             }
         else
@@ -223,6 +239,21 @@ int main(int argc, const char * argv[]) {
                     {
                         kmerfiles.push_back(argv[i]);
                     }
+                else if (strcmp(Argument, "-b") == 0 || strcmp(Argument, "--blacklist") == 0)
+                    {
+                        if (std::filesystem::is_directory(argv[i]))
+                            {
+                                for (const auto& entry : std::filesystem::directory_iterator(argv[i]))
+                                    {
+                                        if (std::filesystem::is_regular_file(entry.path()))
+                                            blacklistfiles.push_back(entry.path().string());
+                                    }
+                            }
+                        else
+                            {
+                                blacklistfiles.push_back(argv[i]);
+                            }
+                    }
                 else if (strcmp(Argument, "-n") == 0 || strcmp(Argument, "--nthreads") == 0)
                     {
                         nthreads = atoi(argv[i]);
@@ -254,6 +285,14 @@ int main(int argc, const char * argv[]) {
     if (!inputfiles.size()) return 1;
     
     if (prefixes.size() < 2) prefixes.push_back("") ;
+
+    if (blacklistfiles.size())
+    {
+        blacklist_intervals.load_files(blacklistfiles);
+    }
+
+    cout << "cross-matrix filtering: "
+         << (strict_mod ? "strict (--strict-mod enabled)" : "off") << endl;
     
     cout <<"start running\n"<<endl;
     run<32>(inputfiles, targetfiles, kmerfiles, outputfiles, prefixes,kmer_size, nthreads,mode,cutoff);

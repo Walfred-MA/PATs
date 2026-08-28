@@ -598,7 +598,7 @@ def insertdistract(alignfile, queryseq, output, singlefile = 1, length = pathmin
 			outseq = seq[start:end]
 			unmasked =   sum(1 for c in outseq if c.isupper())
 			masked = len(outseq) - unmasked
-			if unmasked + masked < pathminsize:
+			if len(re.findall(r'[^ATCGatcg]', outseq)) or unmasked + masked < pathminsize:
 				continue
 	
 			with open(outpath, mode = flag) as w:

@@ -150,6 +150,7 @@ bool Kmer_hash::addvalue(const ull kmer_int, const uint16 value)
         values[hash] = value;
     }
     
+    
     return 0;
 }
 
@@ -427,4 +428,3 @@ ull Kmer_hash::loadhash(const std::string& inputfile)
 
     return totalkmers;
 }
-

@@ -1,14 +1,16 @@
-CXX := g++
-CXXFLAGS := -std=c++17 -O3 -Wall -Wextra
+CXX ?= g++
+CPPFLAGS ?=
+CXXFLAGS ?= -std=c++17 -O3 -Wall -Wextra
+LDFLAGS ?=
+LDLIBS ?=
 
-TARGET := KmerStrd
+TARGET := kmerstrd
 SRCS := src/main.cpp
 
 all: $(TARGET)
 
 $(TARGET): $(SRCS)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
 clean:
 	rm -f $(TARGET)
-

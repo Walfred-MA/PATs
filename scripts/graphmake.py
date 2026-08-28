@@ -5,17 +5,113 @@ import argparse
 import os
 import subprocess
 import datetime
-from graphfilesplit import filesplit
+from graphfilesplit import filesplit, record_filename
 from graphinserts import insertdistract
 from graphcigar import graphcigar
 from graphcleanrepeats import cleanrepeats
 from graphtolinear import graphtolinear
+import re
 
 script_folder = os.path.dirname(os.path.abspath(__file__))
 lock1 = mul.Lock()
 
 ifblast_g = 1
 
+def addgraphglobalcoords(inputfile, graphfile):
+    
+    def parse_input_coord(coord_text):
+        coord_text = coord_text.strip()
+        strand = coord_text[-1] if len(coord_text) and coord_text[-1] in "+-" else "+"
+        core = coord_text[:-1] if len(coord_text) and coord_text[-1] in "+-" else coord_text
+        
+        m = re.match(r"^(.*):(\d+)-(\d+)$", core)
+        if m is None:
+            raise ValueError(f"Cannot parse input coordinate field: {coord_text}")
+        
+        contig = m.group(1)
+        globalstart = int(m.group(2))
+        globalend = int(m.group(3))
+        return contig, globalstart, globalend, strand
+
+    def parse_graph_header_name(header_name):
+        m = re.match(r"^(.*)_(\d+)_(\d+)$", header_name)
+        if m is None:
+            raise ValueError(f"Cannot parse graph header: {header_name}")
+        
+        sequencename = m.group(1)
+        localstart = int(m.group(2))
+        localend = int(m.group(3))
+        return sequencename, localstart, localend
+
+    def resolve_seqname(graph_seqname, inputinfo):
+        if graph_seqname in inputinfo:
+            return graph_seqname
+        
+        parts = graph_seqname.split("_")
+        
+        # graph header may truncate one or more leading "_" fields
+        for i in range(1, len(parts)):
+            candidate = "_".join(parts[i:])
+            if candidate in inputinfo:
+                return candidate
+        
+        return None
+
+    inputinfo = {}
+    with open(inputfile, mode="r") as r:
+        for line in r:
+            if len(line) == 0 or line[0] != ">":
+                continue
+            
+            fields = line.strip().split()
+            if len(fields) < 2:
+                continue
+            
+            seqname = fields[0][1:]
+            contig, globalstart, globalend, strand = parse_input_coord(fields[1])
+            inputinfo[seqname] = (contig, globalstart, globalend, strand)
+
+    tempfile = graphfile + ".addglobalcoords.temp"
+    
+    with open(graphfile, mode="r") as r:
+        with open(tempfile, mode="w") as w:
+            for line in r:
+                if len(line) == 0 or line[0] != ">":
+                    w.write(line)
+                    continue
+                
+                fields = line.strip().split()
+                header_name = fields[0][1:]
+                
+                graph_seqname, localstart, localend = parse_graph_header_name(header_name)
+                matched_name = resolve_seqname(graph_seqname, inputinfo)
+                
+                if matched_name is None:
+                    raise KeyError(f"Cannot find matching input header for graph sequence: {graph_seqname}")
+                
+                contig, globalstart, globalend, strand = inputinfo[matched_name]
+                seqlen = globalend - globalstart
+                
+                if localstart < 0 or localend < localstart or localend > seqlen:
+                    raise ValueError(
+                        f"Local coordinates out of range for {header_name}: "
+                        f"{localstart}-{localend} not within 0-{seqlen}"
+                    )
+                
+                if strand == "+":
+                    graph_globalstart = globalstart + localstart
+                    graph_globalend = globalstart + localend
+                else:
+                    graph_globalstart = globalend - localend
+                    graph_globalend = globalend - localstart
+                
+                graph_globalcoord = f"{contig}:{graph_globalstart}-{graph_globalend}{strand}"
+                
+                newfields = [fields[0], graph_globalcoord] + fields[1:]
+                w.write("\t".join(newfields) + "\n")
+    
+    os.replace(tempfile, graphfile)
+    return graphfile
 
 def checkmask(fasta_file):
     
@@ -27,6 +123,31 @@ def checkmask(fasta_file):
     
     return lowercase_count
 
+def fileordered(allfiles, priors=None):
+    priors = priors or set()
+    reference_files = []
+    query_files = []
+    seen = set()
+    for path in allfiles:
+        if path in seen:
+            continue
+        seen.add(path)
+        fn = os.path.basename(path)
+        stem = fn[:-3] if fn.endswith(".fa") else os.path.splitext(fn)[0]
+        (reference_files if stem in priors else query_files).append(path)
+    return reference_files + query_files
+
+
+def input_file_order(input_fasta, folder):
+    ordered = []
+    with open(input_fasta, mode="r") as handle:
+        for line in handle:
+            if line.startswith(">"):
+                path = os.path.join(folder, record_filename(line[1:].strip()))
+                if os.path.isfile(path):
+                    ordered.append(path)
+    return ordered
+
 def selfalign(input,output,nthreads, ifblast = 0):
     
     if ifblast:
@@ -34,16 +155,18 @@ def selfalign(input,output,nthreads, ifblast = 0):
         os.system(dbcmd)
         cmd = "bash {}/runblastn  -task megablast  -query {} -db {}_db -gapopen 10 -gapextend 2 -word_size 30  -perc_identity 95 -dust yes -lcase_masking -evalue 1e-200 -outfmt 17 -out {}_selfblast.out  -num_threads {} -max_target_seqs 100 ".format( script_folder,input , input, input,nthreads)
         os.system(cmd)
-        cleanrepeats(input, input+"_", nthreads)
+        totalclean = cleanrepeats(input, input+"_", nthreads)
         
         cmd = "{}/runwinnowmap.sh {} {} {} 0.95 150  > {}_selfblast.out".format(script_folder,  input+"_",input+"_", nthreads, input+"_")
         os.system(cmd)
-        cleanrepeats(input+"_", output, nthreads)
+        totalclean += cleanrepeats(input+"_", output, nthreads)
     else:  
-        cmd = "{}/runwinnowmap.sh {} {} {} 0.95 150 masking > {}_selfblast.out".format(script_folder,  input,input, nthreads, input)
+        cmd = "{}/runwinnowmap.sh {} {} {} 0.95 150 > {}_selfblast.out".format(script_folder,  input,input, nthreads, input)
         os.system(cmd)
         
-        cleanrepeats(input, output, nthreads)
+        totalclean = cleanrepeats(input, output, nthreads)
+
+    return totalclean
 
 def callblastn(query, graphfile,  output,nthreads, simi = 0.90, ifrepeat = 1):
     
@@ -58,9 +181,7 @@ def callblastn(query, graphfile,  output,nthreads, simi = 0.90, ifrepeat = 1):
     
     
 def callalign(query, graphfile,  output,nthreads, simi = 0.90,  ifhighqual = 1, ifrepeat = 1):
-    
     if ifhighqual:
-        
         callblastn(query, graphfile,  output,nthreads, simi, ifrepeat)
         
         
@@ -85,13 +206,15 @@ def callalign(query, graphfile,  output,nthreads, simi = 0.90,  ifhighqual = 1, 
             
         if ifrepeat:
             
-            cmd = "{}/runwinnowmap.sh {} {} {} {} 150 >> {}".format(script_folder,  query,graphfile, nthreads, simi, output)
+            cmd = "{}/runwinnowmap.sh {} {} {} {} 150 > {}".format(script_folder,  query,graphfile, nthreads, simi, output+"_wm")
             os.system(cmd)
-            
+            if (not os.path.exists(output+"_wm") or os.path.getsize(output+"_wm") <= 10):
+                os.system(cmd)
+            os.system(f" ( cat  {output}_wm  >> {output} &&  rm {output}_wm  ) || true ")
             
     else:
         #cmd = "{}/runfast.sh {} {} {} 0.95 300 -c > {}".format(script_folder,  query,dbpath, nthreads,output)
-        cmd = "{}/runwinnowmap.sh {} {} {} {} 150 masking > {}".format(script_folder,  query,graphfile, nthreads, simi, output)
+        cmd = "{}/runwinnowmap.sh {} {} {} {} 150 > {}".format(script_folder,  query,graphfile, nthreads, simi, output)
         os.system(cmd)
         
         
@@ -121,8 +244,32 @@ def addnewseq(folder, graphfile, addfile,nthreads, simi, ifblast = 1):
     return insertfiles
 
 def runcleanrepeats(folder, graphfile, newgraphfile,nthreads, ifhighqual = 1):
+
+
+    size = 100000000
     
-    selfalign(graphfile, newgraphfile, nthreads, ifhighqual)
+    ncycle = 1
+    if ifhighqual:
+        ncycle = 10
+   
+    theinput = graphfile
+    theoutput = newgraphfile
+    thetemp  = newgraphfile + ".temp"
+
+    icycle = 0
+    while icycle < ncycle and size > 300:
+        if icycle > 0:
+            ifhighqual = 0
+            theinput = theoutput
+            theoutput = newgraphfile if theoutput  == thetemp else thetemp
+        size = selfalign(theinput, theoutput, nthreads, ifhighqual)
+        icycle += 1
+
+    if theoutput == thetemp:
+        os.replace(thetemp, newgraphfile)
+    elif icycle > 1:
+        os.remove(thetemp)
+
 
     return newgraphfile
 
@@ -149,10 +296,12 @@ def editname(thefile, graphfile):
                 else:
                     w.write(line)
                     
-def creategraph(folder, graphfile,nthreads, ifhighqual = 1):
-    
-    allfiles = [x[1] for x in sorted([( 10e20 + os.path.getsize(folder+"/"+file) if ( "NC_" in file or "CHM13" in file ) else 10e19 + os.path.getsize(folder+"/"+file) if  ( ("_chr" in file or "HG38" in file) and 'HG38alt' not in file ) else  10e18 + os.path.getsize(folder+"/"+file) if  ("HG38alt" in file )  else os.path.getsize(folder+"/"+file) , folder+"/"+file ) for file in os.listdir(folder) if file[-3:]==".fa"], reverse = 1)]
-    
+def creategraph(folder, graphfile,nthreads, ifhighqual = 1, prior = "", ordered_files = None):
+    candidates = ordered_files
+    if candidates is None:
+        candidates = [folder + "/" + file for file in os.listdir(folder) if file.endswith(".fa")]
+    allfiles = fileordered(candidates, set([x for x in prior.split(",") if len(x)]))
+
     if len(allfiles) == 0:
             return
     
@@ -203,19 +352,30 @@ def run_cigar(graphfile, thefile, dbpath):
     
     return [queryname, fullpath, fullcigar, pathranges,qranges]
 
-def aligngraph(folder, graphfile, graphalign,nthreads,ifblast = 0, ifunfinish = 0):
+def aligngraph(folder, graphfile, graphalign,nthreads,ifblast = 0, ifunfinish = 0, ordered_files = None):
     
      
     finished = set()
     if os.path.isfile(graphalign):
     
         if ifunfinish:
+            iferror = 0
             with open(graphalign, mode = 'r') as f:
                 for line in f:
                     line = line.split()
-                    if len(line) > 1:
+                    if len(line) == 5:
                         name = line[0]
                         finished.add(name+".fa")
+                    elif len(line) != 5:
+                        iferror = 1
+            if iferror:
+                with open(graphalign, mode = 'r') as f, open(graphalign+".temp", mode = 'w') as w:
+                    for line in f:
+                        if len(line.split()) != 5:
+                            continue
+                        else:
+                            w.write(line)
+                os.system("mv {} {}".format(graphalign+".temp", graphalign))
         else:
             os.remove(graphalign)
 
@@ -230,7 +390,13 @@ def aligngraph(folder, graphfile, graphalign,nthreads,ifblast = 0, ifunfinish = 
     dbcmd = "ln -f {} {}".format(graphfile, folder+graphfile_filename)
     os.system(dbcmd)
     
-    allfiles = [x[1] for x in sorted([( 10e20 + os.path.getsize(folder+"/"+file) if ( "NC_" in file or "CHM13" in file ) else 10e19 + os.path.getsize(folder+"/"+file) if  ( ("_chr" in file or "HG38" in file) and 'HG38alt' not in file ) else  10e18 + os.path.getsize(folder+"/"+file) if  ("HG38alt" in file )  else os.path.getsize(folder+"/"+file) , folder+"/"+file ) for file in os.listdir(folder) if file.endswith(".fa") and file not in finished], reverse = 1)]
+    candidates = ordered_files
+    if candidates is None:
+        candidates = [folder + "/" + file for file in os.listdir(folder) if file.endswith(".fa")]
+    allfiles = [
+        path for path in candidates
+        if os.path.isfile(path) and os.path.basename(path) not in finished
+    ]
     
     
     with mul.Pool(processes=nthreads) as pool:
@@ -279,16 +445,24 @@ def main(args):
         graphlinear = args.input + "_lineargraph.gaf"
         
         if args.split:
-            filesplit(args.input, folder, 0)
+            ordered_files = filesplit(args.input, folder, 0)
+        else:
+            ordered_files = input_file_order(args.input, folder)
+
+        ordered_files = fileordered(
+            ordered_files,
+            set([name for name in args.prior.split(",") if name]),
+        )
             
-        if args.create:
-            creategraph(folder, graphfile_raw,args.thread, args.ifhighqual)
+        if args.create and (args.unfinish == 0 or not os.path.isfile(graphfile_raw)):
+            creategraph(folder, graphfile_raw,args.thread, args.ifhighqual, args.prior, ordered_files)
             
-        if args.fine:
+        if args.fine and (args.unfinish == 0 or not os.path.isfile(graphfile)):
             runcleanrepeats(folder2, graphfile_raw, graphfile,args.thread, args.ifhighqual)
-            
+            addgraphglobalcoords(args.input, graphfile)
+
         if args.align:
-            aligngraph(folder, graphfile, graphalign,args.thread, args.ifhighqual, args.unfinish)
+            aligngraph(folder, graphfile, graphalign,args.thread, args.ifhighqual, args.unfinish, ordered_files)
             
         if args.linear:
             graphtolinear(graphalign, args.input, graphfile, graphlinear, args.thread, folder+"stretcherouts/", args.globalalign)
@@ -315,6 +489,7 @@ def run():
     parser.add_argument("-g", "--globalalign", help="if align to graph", dest="globalalign", type=int,default = 0)
     parser.add_argument("-q", "--highqual", help="if align to graph", dest="ifhighqual", type=int,default = 1)
     parser.add_argument("-u", "--unfinish", help="if restart", dest="unfinish", type=int,default = 1)
+    parser.add_argument("-p", "--prior", help="comma-separated reference record names to place first", dest="prior", type=str,default = "")
     parser.set_defaults(func=main)
     args = parser.parse_args()
     args.func(args)

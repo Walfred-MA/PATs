@@ -3,6 +3,7 @@
 import os
 import argparse
 import collections as cl
+from bitarray import bitarray
 import re
 import sys
 import numpy as np
@@ -12,6 +13,7 @@ pyximport.install(
     setup_args={"include_dirs": [np.get_include()]}
 )
 from hashmap import KmerDB,create_kmerdb  # hashmap.pyx must be in the current folder or PYTHONPATH
+from matrixformat import INDEX_VERSION_LINE
 
 
 
@@ -21,7 +23,7 @@ reciprocals = [200, 196, 192, 189, 185, 182, 179, 175, 172, 169, 167, 164, 161, 
 reciprocals_uindex = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 57, 58, 59, 60, 61, 62, 62, 63, 64, 65, 65, 66, 67, 67, 68, 69, 69, 70, 71, 71, 72, 72, 73, 74, 74, 75, 75, 76, 76, 77, 78, 78, 79, 79, 80, 80, 81, 81, 82, 82, 82, 83, 83]
 
 anchorsize = 3000
-fixcol = 10
+fixcol = 15
 
 
 def pack_numbers(first, second, third):
@@ -59,7 +61,7 @@ def intencode(value):
 def intencode_single(value, start = '0'):
     
     code = chr( ord(start) + value ) 
-        
+    
     return code
 
 def kmerencode(kmer):
@@ -137,7 +139,7 @@ def getmax(text):
     return c
 
 def adderrorcorr(inputfile, errorfile ):
-   
+    
     kmdatabase = create_kmerdb()
     kmdatabase.load(errorfile)
     biasbins = [0]*101
@@ -151,7 +153,8 @@ def adderrorcorr(inputfile, errorfile ):
                 if line[0] == "&" or line[0] == '^':
                     
                     line = line.split('\t')
-                   
+                    
+                    """
                     if len(line[2]) < 3:
                         line[2] = "0"*(3-len(line[2])) + line[2]
                         
@@ -160,8 +163,8 @@ def adderrorcorr(inputfile, errorfile ):
 
                     if len(line[4]) < 11:
                         line[4] = "0"*(11-len(line[4])) + line[4]
-                
-
+                    """
+                    
                     kmerint = kmerdecompress(line[4])
                     
                     packed = kmdatabase.find(kmerint)
@@ -170,7 +173,7 @@ def adderrorcorr(inputfile, errorfile ):
                         valid, biasflag, kmerratio, kmervar = packed
                     else:
                         valid, biasflag, kmerratio, kmervar = 0, 0, 50,100
-               
+                        
                     biasbins[biasflag] += 1
                     meanbins[kmerratio] += 1
                     varbins[kmervar] += 1
@@ -180,43 +183,64 @@ def adderrorcorr(inputfile, errorfile ):
             line = r.readline()
             
     os.system("mv {} {}".format(inputfile+"_", inputfile))
-   
+    
     print("Frequecy summary of values:\n")
     for i in range(101):
         print(f"{i}\t{biasbins[i]}\t{meanbins[i]}\t{varbins[i]}")
         
-
+        
+        
+def getdupsindex(inputfile):
+    kmer_array = np.empty(2**32 - 1, dtype=np.uint64)  # ~32GB
+    lindex = 0
     
+    with open(inputfile, "r") as r:
+        for line in r:
+            if line and line[0] in "&^*.":
+                fields = line.rstrip("\n").split("\t")
+                if len(fields) > 4:
+                    kmer_array[lindex] = kmerdecompress(fields[4])
+                    lindex += 1
+                    
+    ifdup = bitarray(lindex)
+    ifdup.setall(0)
+    
+    order = np.argsort(kmer_array[:lindex], kind="mergesort")
+    lastkmer = np.uint64(2**64 - 1)
+    
+    for idx in order:
+        kmer = kmer_array[idx]
+        if kmer == lastkmer:
+            ifdup[idx] = 1
+        lastkmer = kmer
+        
+    return ifdup
+
+            
 def clearreds(inputfile):
     
-    w = open(inputfile+"_", mode = 'w')
-    names = []
-    kmer_nums = []
-    eles_nums = []
-    passedkmers = set()
-    with open(inputfile, mode = 'r') as r:
-        
-        line = r.readline()
-        kmer_num = 0
-        eles_num = 0
-        while line:
-            if line.startswith("&") or line.startswith("^"):
-                line = line.split('\t')
-                kmerint = kmerdecompress(line[4])
-                    
-                if kmerint in passedkmers:
-                    line[0] = '^'+line[0][1:]
-                else:
-                    line[0] = '&'+line[0][1:]
-                    passedkmers.add(kmerint)
-                line = "\t".join(line)
-                
-            w.write(line)
-            line = r.readline()         
-            
-    w.close()
-    os.system("mv {} {}".format(inputfile+"_", inputfile))
+    ifdup = getdupsindex(inputfile)
     
+    tmp = inputfile + "_"
+    lindex = 0
+    
+    with open(inputfile, "r") as r, open(tmp, "w") as w:
+        for line in r:
+            if line and line[0] in "&^*.":
+                fields = line.split("\t")
+                
+                if ifdup[lindex]:
+                    if fields[0].startswith("&"):
+                        fields[0] = "^" + fields[0][1:]
+                    elif fields[0].startswith("*"):
+                        fields[0] = "." + fields[0][1:]
+                        
+                w.write("\t".join(fields))
+                lindex += 1
+            else:
+                w.write(line)
+                
+    os.replace(tmp, inputfile)
     
     
 def matrixindex(inputfile, genedbfile):
@@ -224,7 +248,7 @@ def matrixindex(inputfile, genedbfile):
     if len(genedbfile):
         genecode = GenodeDB(genedbfile)
         
-
+        
     genes = []
     allrefregions = []
     regions = cl.defaultdict(list)
@@ -232,26 +256,34 @@ def matrixindex(inputfile, genedbfile):
     
     names = [] 
     locations = []
+    gene_nums = []
     kmer_nums = []
     eles_nums = []
     extd_nums = []
+    extd_kmers = []
     passedkmers = set()
     with open(inputfile, mode = 'r') as r:
         line = r.readline()
         kmer_num = 0
+        gene_num = 0
         eles_num = 0
         extd_num = 0
         extd_num = 0
+        extd_kmer = 0
         lindex = 0 
         while line:
             if len(line):
                 if line.startswith('#'):
                     locations.append(r.tell() - len(line))
+                    gene_nums.append(gene_num)
                     kmer_nums.append(kmer_num)
                     eles_nums.append(eles_num)
                     names.append(line.split()[0]) 
                     extd_nums.append(extd_num)
-                    kmer_num = 0 
+                    extd_kmers.append(extd_kmer)
+                    gene_num = 0
+                    kmer_num = 0
+                    extd_kmer = 0
                     eles_num = 0
                     extd_num = 0
                     if len(genedbfile):
@@ -262,10 +294,13 @@ def matrixindex(inputfile, genedbfile):
                     allrefregions.append("".join(refregions))
                     refregions = []
                     regions = cl.defaultdict(list)
+                
+                if line.startswith(('&', '^', '*', '.')):
                     
-                elif line.startswith(('&', '^', '*')):
-                    
-                    kmer_num += 1
+                    if line.startswith(('&','^')):
+                        kmer_num += 1
+                    else:
+                        extd_kmer += 1
                     line = line.split('\t')
                     
                     ranges = 0
@@ -278,6 +313,7 @@ def matrixindex(inputfile, genedbfile):
                     eles_num += ranges+ fixcol
                     extd_num += (extd1 + 2)
                 elif line.startswith( '>'):
+                    gene_num += 1
                     for x in line.split(";"):
                         region = x.split('\t')[1]
                         contig,start,end = addcoordi(region, regions)
@@ -285,30 +321,34 @@ def matrixindex(inputfile, genedbfile):
                             refregions.append(f"{contig}:{max(1,start-3000)}-{end+3000}{region[-1]};")
             line = r.readline()           
             lindex += 1
-
-
+            
+            
         locations.append(r.tell())
+        gene_nums.append(gene_num)
         kmer_nums.append(kmer_num)
         eles_nums.append(eles_num)
         extd_nums.append(extd_num)
+        extd_kmers.append(extd_kmer)
         if len(genedbfile):
             genes.append(genecode.Overlap(regions))
         else:
             genes.append("")
         allrefregions.append("".join(refregions))
-   
+        
     with open(inputfile+".index", mode = 'w') as f:
+
+        f.write(INDEX_VERSION_LINE + "\n")
         
         last_location = 0
         
-        for name, location,kmer_num, eles_num, extd_num, gene, refregion in zip(names, locations[1:], kmer_nums[1:], eles_nums[1:], extd_nums[1:], genes[1:], allrefregions[1:]):
+        for name, location,kmer_num, eles_num, extd_num, extd_kmer, genum, gene, refregion in zip(names, locations[1:], kmer_nums[1:], eles_nums[1:], extd_nums[1:],extd_kmers[1:], gene_nums[1:], genes[1:], allrefregions[1:]):
             
             if name.startswith("#HLA"):
                 refregion += "HLA;"
                 
-            f.write("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n".format(name, last_location, location, kmer_num, eles_num, extd_num, refregion, "".join([ x+";" for x in gene if x.startswith(name[1:].split("_")[0]) or name.startswith("#group")]) ))
+            f.write("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n".format(name, last_location, location, kmer_num, eles_num, extd_num, extd_kmer, genum,refregion,"".join([ x+";" for x in gene if x.startswith(name[1:].split("_")[0]) or name.startswith("#group")]) ))
             last_location = location
-        
+            
     return names, locations, kmer_nums, eles_nums, allrefregions
 
 
@@ -318,10 +358,15 @@ class GenodeDB:
     def __init__(self, path):
         
         self.pattern = re.compile(r'(?:gene_name=)([^;]+)')
-        self.path = path
+        paths = [x for x in path.split(",") if x]
         self.gene = cl.defaultdict(list)
         
-        with open(self.path, mode = 'r') as r:
+        for path in paths:
+            self.load_gff(path)
+
+    def load_gff(self, path):
+
+        with open(path, mode = 'r') as r:
             
             for line in r:
                 if len(line) == 0 or line[0]=="#":
@@ -431,8 +476,8 @@ def main(args):
         adderrorcorr(args.input,args.error )
         
     matrixindex(args.input, args.gene)
-
-            
+    
+    
 def run():
     """
         Parse arguments and run
