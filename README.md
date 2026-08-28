@@ -208,33 +208,8 @@ This creates:
 - All_matrix.txt.index   → index file
 ```
 
-Matrix format v2.0.1
---------------------
 
-`matrixcompile.py` writes fixed-width k-mer metadata. A k-mer row has six
-tab-separated fields:
-
-```
-row marker | tag(3) | path+strand(3) + qindex(3) | size(4) + qpos(4) + rpos(4) | k-mer(11) | allele indexes
-```
-
-The three-character path field stores `(path_index << 1) | strand`, where
-strand is `0` for `+` and `1` for `-`. The k-mer begins at byte offset 27 and
-the allele-index field begins at byte offset 39. Internal `|` separators are
-not used. All numeric fields use the existing 64-character integer encoding.
-
-Limits are path index `0..32767`, query index `0..262143`, and
-size/query-position/reference-position `0..16777215`. Compilation stops with
-an error if a value is outside its field range; paths are never combined into
-a virtual overflow path.
-
-`matrixindex.py` writes this as the first index line:
-
-```
-@v2.0.1,support:v1.2.0
-```
-
-Note: You might need a background kmer file, which can be obtained from Ctyper's GitHub site, and you may name it as All_matrix.txt.bgd for your convenient
+Note: You might need a background kmer file, which can be obtained from Ctyper's GitHub site, and you may name it as $matrixfilename.bgd for your convenient
 
 4) Tips & Gotchas
 ------------------
