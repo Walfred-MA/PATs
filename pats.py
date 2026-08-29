@@ -35,7 +35,7 @@ def existing_file(value: str) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pats.py",
-        description="Build an indexed PATs pangenome-allele matrix from BED, gene, or FASTA targets.",
+        description="Build a PATs allele FASTA and indexed matrix from BED, gene, or FASTA targets.",
     )
     targets = parser.add_mutually_exclusive_group(required=True)
     targets.add_argument("-b", "--bed", type=existing_file, help="0-based half-open target BED")
@@ -56,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-o",
         "--output",
         required=True,
-        help="output prefix; writes PREFIX.matrix.txt, PREFIX.matrix.txt.index, and PREFIX.work/",
+        help="output prefix; writes PREFIX.fa, PREFIX.matrix.txt, PREFIX.matrix.txt.index, and PREFIX.work/",
     )
 
     parser.add_argument("--gene-extension", "--geneExtension", type=int, default=5_000)
@@ -202,6 +202,19 @@ def build_config(args: argparse.Namespace) -> tuple[dict, Path]:
     work_dir.mkdir(parents=True, exist_ok=True)
     records, query_table, search_table = normalize_queries(args, work_dir)
 
+    fasta_output = Path(f"{output_prefix}.fa")
+    protected_inputs = [Path(args.reference), Path(args.queries)]
+    protected_inputs.extend(record.fasta for record in records)
+    for value in (args.bed, args.fasta, args.gff3, args.exon):
+        if value:
+            protected_inputs.append(Path(value))
+    for protected in protected_inputs:
+        if paths_refer_to_same_file(fasta_output, protected):
+            raise ValueError(
+                f"refusing to overwrite input file {protected} with final FASTA {fasta_output}; "
+                "choose a different --output prefix"
+            )
+
     name_prefix = sanitize_name(output_prefix.name, fallback="PATs")
     config = {
         "version": 1,
@@ -231,6 +244,7 @@ def build_config(args: argparse.Namespace) -> tuple[dict, Path]:
         "reference_prefix": args.reference_prefix,
         "threads": args.threads,
         "sample_threads": args.sample_threads,
+        "fasta": str(fasta_output),
         "matrix": f"{output_prefix}.matrix.txt",
         "matrix_index": f"{output_prefix}.matrix.txt.index",
     }
@@ -274,6 +288,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(str(exc))
 
     print(f"[PATs] normalized configuration: {config_path}")
+    print(f"[PATs] output FASTA: {config['fasta']}")
     print(f"[PATs] output matrix: {config['matrix']}")
     print(f"[PATs] command: {shlex.join(command)}")
     if args.prepare_only:

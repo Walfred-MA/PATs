@@ -31,8 +31,10 @@ GROUP_MANIFEST = TARGET_DIR / "groups.tsv"
 INDEX_SENTINEL = WORK / "inputs" / "query_indexes.tsv"
 SEARCH_DIR = WORK / "search"
 SEARCH_DONE = SEARCH_DIR / ".done"
+KMERS_DIR = WORK / "kmers"
 MATRIX = Path(config["matrix"])
 MATRIX_INDEX = Path(config["matrix_index"])
+FINAL_FASTA = Path(config.get("fasta", f"{config['output_prefix']}.fa"))
 
 INDEX_QUERIES_SCRIPT = shlex.quote(str(SCRIPTS / "index_queries.py"))
 PREPARE_TARGETS_SCRIPT = shlex.quote(str(SCRIPTS / "prepare_targets.py"))
@@ -45,6 +47,7 @@ RUN_GFIXBREAKS_SCRIPT = shlex.quote(str(SCRIPTS / "run_gfixbreaks.py"))
 ADDREGION_SCRIPT = shlex.quote(str(SCRIPTS / "addregion.py"))
 SELECT_KMERS_SCRIPT = shlex.quote(str(SCRIPTS / "select_exclusive_kmers.py"))
 PACKEDRUN_SCRIPT = shlex.quote(str(SCRIPTS / "packedrun.py"))
+COMBINE_FASTAS_SCRIPT = str(SCRIPTS / "combine_fastas.py")
 
 Q_QUERY_TABLE = shlex.quote(str(QUERY_TABLE))
 Q_SEARCH_TABLE = shlex.quote(str(SEARCH_TABLE))
@@ -119,9 +122,17 @@ def matrix_shards(wildcards):
     ]
 
 
+def fasta_shards(wildcards):
+    return [
+        str(WORK / "groups" / row["group"] / "fixed.fa")
+        for row in read_group_rows(wildcards)
+    ]
+
+
 rule all:
     input:
-        str(MATRIX_INDEX)
+        str(MATRIX_INDEX),
+        str(FINAL_FASTA),
 
 
 rule index_queries:
@@ -274,7 +285,7 @@ rule add_filtered_regions:
         fixed=str(WORK / "groups" / "{group}" / "fixed.fa"),
         filtered=str(WORK / "groups" / "{group}" / "hits.filtered.fa"),
     output:
-        str(WORK / "groups" / "{group}" / "augmented.fa")
+        temp(str(WORK / "groups" / "{group}" / "augmented.fa"))
     shell:
         "{PYTHON} {ADDREGION_SCRIPT} -i {input.fixed:q} -a {input.filtered:q} "
         "-o {output:q} -q {Q_QUERY_TABLE} "
@@ -285,7 +296,7 @@ rule exclusive_kmers:
     input:
         fasta=str(WORK / "groups" / "{group}" / "augmented.fa")
     output:
-        str(WORK / "groups" / "{group}" / "exclusive.kmers.txt")
+        temp(str(KMERS_DIR / "{group}.exclusive.kmers.txt"))
     threads:
         THREADS
     shell:
@@ -295,8 +306,8 @@ rule exclusive_kmers:
 
 rule packedrun:
     input:
-        fasta=str(WORK / "groups" / "{group}" / "augmented.fa"),
-        kmers=str(WORK / "groups" / "{group}" / "exclusive.kmers.txt"),
+        fasta=str(WORK / "groups" / "{group}" / "fixed.fa"),
+        kmers=str(KMERS_DIR / "{group}.exclusive.kmers.txt"),
         reference=group_value("fasta"),
         graph_base=str(WORK / "groups" / "{group}" / "fixed.fa_loci.txt.fasta"),
         graph=str(WORK / "groups" / "{group}" / "fixed.fa_loci.txt.fasta_graph.FA"),
@@ -310,6 +321,18 @@ rule packedrun:
         "-r {input.reference:q} -g {input.graph_base:q} -a {input.alignment:q} -o {output:q} "
         "--scripts-dir {Q_SCRIPTS} --tools-dir {Q_TOOLS} "
         "--reference-sample {params.reference_sample:q}"
+
+
+rule combine_fastas:
+    input:
+        fasta_shards
+    output:
+        str(FINAL_FASTA)
+    run:
+        subprocess.run(
+            [sys.executable, COMBINE_FASTAS_SCRIPT, "-o", output[0], *input],
+            check=True,
+        )
 
 
 rule combine_matrices:

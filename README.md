@@ -5,8 +5,33 @@ both functional annotation and NGS genotyping. The pipeline consumes:
 (1) haplotype-resolved assemblies and reference genomes
 (2) a BED file of target genes (optionally with exon targets)
 
-Major stages: input preparation, masking, target extraction, and running
-the Snakemake workflow.
+Major stages: input preparation, masking, target extraction, local graph
+construction, exclusive-k-mer selection, and matrix compilation.
+
+Primary outputs from the redesigned `pats.py` workflow
+-------------------------------------------------------
+
+For output prefix `PREFIX`, PATs produces three primary files:
+
+```
+PREFIX.fa
+PREFIX.matrix.txt
+PREFIX.matrix.txt.index
+```
+
+`PREFIX.fa` is as important as the matrix. It contains the final
+`gfixbreaks.py` allele/locus sequences from every target group, combined in the
+same group order as the matrix. It does not contain sequences temporarily
+reintroduced by `addregion.py`.
+
+`addregion.py` creates an augmented FASTA only to prevent valid exclusive
+k-mers from being lost because of sequence filtration. That augmented FASTA is
+used by `kmer_selector`, then deleted. `packedrun.py` and the final FASTA use
+the final `fixed.fa` sequences instead.
+
+The selector writes its working files under `PREFIX.work/kmers/`. Per-assembly
+scratch files are removed immediately after `kmer_selector` finishes, and the
+remaining exclusive-k-mer file is removed after `packedrun.py` consumes it.
 
 Requirements (high level)
 ----------------------------

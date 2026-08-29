@@ -15,13 +15,19 @@ only as legacy examples. They are not required by the redesigned workflow.
 1. WHAT PATs PRODUCES
 ---------------------
 
-PATs builds an indexed pangenome-allele matrix for one or more target genes,
-genomic regions, or FASTA sequences.
+PATs builds a pangenome-allele FASTA and an indexed matrix for one or more
+target genes, genomic regions, or FASTA sequences.
 
 For output prefix PREFIX, the final products are:
 
+    PREFIX.fa
     PREFIX.matrix.txt
     PREFIX.matrix.txt.index
+
+PREFIX.fa is a primary output, not a disposable intermediate. It contains the
+final gfixbreaks.py allele/locus sequences from every target group, combined in
+the same group order used to combine the matrix shards. Sequences temporarily
+reintroduced by addregion.py are not included in PREFIX.fa.
 
 Intermediate and resumable files are stored in:
 
@@ -433,17 +439,25 @@ Use the equals sign when ARGUMENT begins with --.
    gfixbreaks caching is disabled. BED/gene coordinates provide initial regions;
    FASTA mode obtains initial reference blocks with find_consistent_units.py.
 
-9. Reinclude filtered regions with addregion.py and select k-mers exclusive to
-   the target loci across all query assemblies.
+9. Temporarily reinclude filtered regions with addregion.py so valid exclusive
+   k-mers are not lost solely because of sequence filtration. Run kmer_selector
+   across all query assemblies. Its scratch files are isolated under
+   PREFIX.work/kmers/ and removed after selection; the augmented FASTA is also
+   removed after k-mer selection completes.
 
-10. Run packedrun.py and matrixcompile.py for each group, combine group matrix
-    shards, and create the final index with matrixindex.py.
+10. Run packedrun.py and matrixcompile.py against the final fixed.fa sequences,
+    not the temporary augmented FASTA. Combine fixed FASTA shards into PREFIX.fa,
+    combine group matrix shards, and create the index with matrixindex.py.
 
 
 9. OUTPUT AND WORK DIRECTORY
 ----------------------------
 
 Final files:
+
+    PREFIX.fa
+        Combined final allele/locus FASTA produced by gfixbreaks.py. This is a
+        primary PATs result and contains no temporary addregion.py sequences.
 
     PREFIX.matrix.txt
         Combined PATs allele/k-mer matrix.
@@ -477,10 +491,19 @@ Important intermediate files:
     PREFIX.work/groups/groupN/hits.bed
     PREFIX.work/groups/groupN/hits.report.json
     PREFIX.work/groups/groupN/fixed.fa
-    PREFIX.work/groups/groupN/augmented.fa
-    PREFIX.work/groups/groupN/exclusive.kmers.txt
     PREFIX.work/groups/groupN/matrix.txt
-        Per-group hit, graph, k-mer, and matrix outputs.
+        Per-group hit, final graph FASTA, and matrix outputs.
+
+Temporary selector files:
+
+    PREFIX.work/groups/groupN/augmented.fa
+        addregion.py output used only by kmer_selector. Snakemake removes it
+        after successful exclusive-k-mer selection.
+
+    PREFIX.work/kmers/groupN.exclusive.kmers.txt
+        Exclusive k-mers consumed by packedrun.py and then removed as a
+        Snakemake temporary output. Per-assembly kmer_selector scratch files use
+        the same kmers/ directory and are removed immediately after selection.
 
 
 10. MATRIX FORMAT AND CTYPER
@@ -510,6 +533,191 @@ The shared encoding constants are in:
 This format is intended for the updated Ctyper 1.2.0 reader with v2.0.1 format
 information and automatic detection for matrices lacking an explicit version.
 An older, unmodified Ctyper binary may not decode a v2.0.1 matrix correctly.
+
+
+10.1 PROFILING WITH CTYPER FOR FAST TARGET GENOTYPING
+------------------------------------------------------
+
+PATs builds the matrix database. Ctyper profiling is a separate, usually
+one-time step that examines aligned reads to locate the reference intervals
+from which informative or mismapped target reads originate. The resulting BED
+file can then be supplied with -B so later Ctyper runs read only those regions
+instead of scanning every aligned read.
+
+This workflow is intended for indexed BAM or CRAM files. It has two phases:
+
+    1. Profile one or more representative aligned samples to make a target BED.
+    2. Reuse that BED with -B for fast genotyping of other samples.
+
+Required files
+~~~~~~~~~~~~~~
+
+Keep the PATs matrix and its index together:
+
+    CYP2D.matrix.txt
+    CYP2D.matrix.txt.index
+
+The Ctyper binary must include support for PATs matrix encoding v2.0.1. BAM
+files should have a .bai index and CRAM files should have a .crai index. When
+reading CRAM, provide the exact decoding reference with -T unless REF_CACHE and
+REF_PATH have already been configured.
+
+The profiling BED is tied to the reference coordinate system used by the
+aligned reads, not necessarily the reference used by PATs to construct the
+matrix. For example, reads aligned to hg38 require an hg38 profiling BED, even
+if the PATs matrix was anchored on CHM13. Do not reuse an hg38 profiling BED
+for CHM13-aligned reads, or the reverse.
+
+Record the alignment-reference MD5 in the BED filename:
+
+    md5sum aligned_reference.fa
+
+For example:
+
+    TargetRegions.<reference_md5>.bed
+
+Profiling one representative sample
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Run profiling without -B. Ctyper must scan the aligned file to discover all
+useful source intervals:
+
+    ctyper \
+      -m CYP2D.matrix.txt \
+      -p representative.cram \
+      -o TargetRegions.<reference_md5>.bed \
+      -T aligned_reference.fa \
+      -d 1 \
+      -N 4 \
+      2> CYP2D.profile.log
+
+In the current Ctyper 1.2.0 command-line implementation, -d 1 is needed to
+satisfy coverage-input validation during profiling. Profiling does not use
+that placeholder value for genotyping.
+
+For a CYP2D-only PATs matrix, no -g option is necessary because every matrix
+group is already a CYP2D target. For a database containing many gene families,
+add a quoted prefix or an exact gene/matrix name, for example:
+
+    -g 'CYP2D*'
+    -g CYP2D6
+    -g '#CYP2Dgroup1'
+
+Use the exact names present in CYP2D.matrix.txt.index. A trailing * selects a
+prefix and should be quoted so the shell does not expand it.
+
+Profiling several samples
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Several representative samples can find mapping locations that are absent
+from one individual. Make one input list and one output list, with one path per
+line and the same number and order of lines:
+
+    profile.inputs.txt                 profile.outputs.txt
+    ------------------                 -------------------
+    sample1.cram                       profiles/sample1.bed
+    sample2.cram                       profiles/sample2.bed
+    sample3.cram                       profiles/sample3.bed
+
+Then run:
+
+    ctyper \
+      -m CYP2D.matrix.txt \
+      -P profile.inputs.txt \
+      -O profile.outputs.txt \
+      -o TargetRegions.<reference_md5>.bed \
+      -T aligned_reference.fa \
+      -d 1 \
+      -n 3 \
+      -N 2 \
+      2> CYP2D.profile.log
+
+Keep -P before -O and keep the merged-summary -o after -O. The -O paths receive
+the per-sample profiling BEDs and -o receives the merged BED. Use a new summary
+pathname rather than mixing regions from an unrelated reference or an older
+profiling experiment.
+
+Fast genotyping of one sample
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+After profiling, reuse the BED with -B:
+
+    ctyper \
+      -m CYP2D.matrix.txt \
+      -i new_sample.cram \
+      -o new_sample.CYP2D.ctyper.txt \
+      -B TargetRegions.<reference_md5>.bed \
+      -T aligned_reference.fa \
+      -d 24 \
+      -N 4 \
+      2> new_sample.CYP2D.log
+
+The example -d 24 is the expected 31-mer depth for approximately 30x coverage
+with 150-bp reads:
+
+    31-mer depth = (1 - 30/read_length) * sequencing depth
+
+Replace 24 with the appropriate value for the sample. Do not use -d together
+with -b. If CYP2D.matrix.txt.bgd exists, Ctyper uses it automatically and -d
+can be omitted. A depth file can instead be provided with -D for a cohort.
+
+Ctyper appends normal genotyping output when an -o path already exists. Use a
+new output pathname for each run unless appending is intentional.
+
+Fast genotyping of a cohort
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Create matching files with one input path and one output path per line:
+
+    cohort.inputs.txt                  cohort.outputs.txt
+    -----------------                  ------------------
+    sampleA.cram                       results/sampleA.ctyper.txt
+    sampleB.cram                       results/sampleB.ctyper.txt
+    sampleC.cram                       results/sampleC.ctyper.txt
+
+For samples with individual depth estimates, also create cohort.depths.txt
+with one 31-mer depth value per line in input order. Then run:
+
+    ctyper \
+      -m CYP2D.matrix.txt \
+      -I cohort.inputs.txt \
+      -O cohort.outputs.txt \
+      -D cohort.depths.txt \
+      -B TargetRegions.<reference_md5>.bed \
+      -T aligned_reference.fa \
+      -n 8 \
+      -N 2 \
+      2> CYP2D.cohort.log
+
+Here -n is the number of samples processed in parallel and -N is the number of
+threads used within each sample. Approximate simultaneous CPU use is -n times
+-N, so select both values to fit the cluster allocation. Parallelizing across
+samples is usually the most efficient choice for a cohort; 1-4 threads per
+sample is a practical starting point when storage I/O is limiting.
+
+For a multi-family matrix, restrict both profiling and genotyping consistently
+with -g 'CYP2D*' or a matching -G gene-list file. When -g/-G and -B are used
+together, Ctyper uses only BED records whose names match the selected targets.
+
+If no profiling BED is available
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Ctyper can use matrix reference intervals as a fallback for a selected target:
+
+    ctyper \
+      -m multi_family.matrix.txt \
+      -i sample.cram \
+      -o sample.CYP2D.ctyper.txt \
+      -g 'CYP2D*' \
+      -r gene \
+      -T aligned_reference.fa \
+      -d 24 \
+      -N 4 \
+      2> sample.CYP2D.log
+
+This fallback can miss useful reads that map outside the expected locus and is
+less robust to mismapping and reference bias. A BED learned by profiling
+representative aligned samples is preferred for repeated fast target runs.
 
 
 11. RESUMING, DRY RUNS, AND UNLOCKING
