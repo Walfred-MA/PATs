@@ -279,6 +279,10 @@ def snakemake_command(args: argparse.Namespace, config_path: Path) -> list[str]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["transcripts"]:
+        from patslib.transcripts.cli import main as transcripts_main
+        return transcripts_main(argv[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
